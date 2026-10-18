@@ -1,0 +1,460 @@
+---
+title: "Predicting oral temperature from infrared measurements"
+format: gfm
+editor: visual
+---
+
+# Introduction
+
+This project aims to predict oral reference temperature from facial infrared measurements and environmental variables using two regression approaches: Bayesian hierarchical modelling and random forest regression. Using data collected with two infrared thermal imaging devices, FLIR and ICI, we investigate the relationship between these predictors and oral temperature measured with a reference thermometer.
+
+The two approaches provide different ways of modelling this relationship. Bayesian hierarchical modelling represents structured variation through an explicit probabilistic model, whereas random forest regression can capture nonlinear relationships and interactions through an ensemble of regression trees. Their predictive performance is compared on held-out test data using root mean squared error (RMSE) and mean absolute error (MAE). The comparison examines the strengths and limitations of each approach for predicting oral temperature.
+
+# Software environment and requirements
+
+All analyses are performed in R using RStudio as the development environment. For the random forest analysis, `ranger` is used to fit regression forests and calculate permutation feature importance.
+
+The required packages can be installed using:
+
+``` r
+install.packages(c(
+  "readr", "dplyr", "tidyr", "ggplot2",
+  "caret", "ranger", "doParallel"
+))
+```
+
+# Data, target and predictors
+
+The source is [Facial and oral temperature data, version 1.0.0](https://physionet.org/content/face-oral-temp-data/1.0.0/), with version DOI [10.13026/3bhc-9065](https://doi.org/10.13026/3bhc-9065). The repository provides the dataset under CC0 1.0.
+
+The target is **`aveOralM`**, the average of two oral thermometer monitor-mode measurements, in degrees Celsius. Monitor mode was preferred to fast mode because it was more accurate.
+
+| Input group | Variables before four-round aggregation |
+|------------------------------------|------------------------------------|
+| Canthus circles | Max1R13\_, Max1L13\_, aveAllR13\_, aveAllL13\_ |
+| Right canthus | T_RC, T_RC_Dry, T_RC_Wet, T_RC_Max |
+| Left canthus | T_LC, T_LC_Dry, T_LC_Wet, T_LC_Max |
+| Small/extended canthus regions | RCC, LCC, canthiMax, canthi4Max |
+| Forehead | T_FHCC, T_FHRC, T_FHLC, T_FHBC, T_FHTC, T_FH_Max, T_FHC_Max |
+| Whole face and mouth surface | T_Max, T_OR, T_OR_Max |
+| Environmental inputs | T_atm (degrees C), Humidity (%), Distance (m) |
+
+```{r}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.path = "figures/", dev = "png", dpi = 110,
+  fig.width = 7.5, fig.height = 4.6, out.width = "85%"
+)
+options(width = 110, dplyr.summarise.inform = FALSE)
+invisible(Sys.setlocale("LC_ALL", "C.UTF-8")) 
+```
+
+# Random Forest
+
+Setup: load packages, set seed, define global parameters
+
+```{r}
+library(readr); library(dplyr); library(tidyr); library(ggplot2)
+library(caret); library(ranger); library(doParallel)
+
+set.seed(2026)
+FAST <- FALSE                       
+DATA_DIR <- "data"                  
+TRAIN_FRAC <- 0.8                   
+TARGET <- "aveOralM"                
+OTHER_ORAL <- setdiff(c("aveOralF", "aveOralM"), TARGET)
+DROP_ORAL_DISAGREE <- FALSE         
+N_CORES  <- 2
+registerDoParallel(N_CORES)
+
+K_FOLDS <- 5; N_REPEATS <- if (FAST) 1 else 3
+N_TREES_RFE <- if (FAST) 150 else 300   
+N_TREES_FINAL <- 1000                   
+```
+
+## 1. Read input files
+
+```{r}
+read_irt <- function(path) {
+  read_csv(path, skip = 2, na = c("", "NA"), show_col_types = FALSE,
+           name_repair = function(x) ifelse(x == "", paste0("blank", seq_along(x)), x)) |>
+    rename_with(~ sub("^T_LC14$", "T_LC4", .x)) |>
+    select(-starts_with("blank"))
+}
+
+raw <- lapply(c(FLIR = "FLIR", ICI = "ICI"), function(dev) {
+  d <- read_irt(file.path(DATA_DIR, paste0(dev, "_groups1and2.csv")))
+  stopifnot(!anyDuplicated(d$SubjectID))
+  d
+})
+
+sapply(raw, \(d) c(rows = nrow(d), cols = ncol(d)))
+```
+
+## 2. Clean Data
+
+```{r}
+meta_cols <- c("SubjectID", "aveOralF", "aveOralM", "Gender", "Age", "Ethnicity",
+               "T_atm", "Humidity", "Distance", "Cosmetics", "Time", "Date")
+
+irt26 <- c("Max1R13", "Max1L13", "aveAllR13", "aveAllL13",
+           "T_RC", "T_RC_Dry", "T_RC_Wet", "T_RC_Max", "T_LC", "T_LC_Dry", "T_LC_Wet", "T_LC_Max",
+           "RCC", "LCC", "canthiMax", "canthi4Max",
+           "T_FHCC", "T_FHRC", "T_FHLC", "T_FHBC", "T_FHTC", "T_FH_Max", "T_FHC_Max",
+           "T_Max", "T_OR", "T_OR_Max")
+length(irt26)
+```
+
+1.  Line up the readings. It rearranges the table so every row is one reading: who, which measurement, which round, and the value.
+2.  Throw out impossible readings. A real face is never colder than 30 °C.
+3.  Average what’s left. For each person and each measurement, it takes the average of the valid rounds. If all 4 rounds are missing, the result stays “missing”.
+4.  Count the good rounds. It records how many valid rounds each person has
+
+```{r}
+round_mean <- function(d, min_temp = 30) {
+  long <- d |>
+    select(SubjectID, all_of(setdiff(names(d), meta_cols))) |>
+    pivot_longer(-SubjectID, names_to = c("var", "round"),
+                 names_pattern = "^(.*?)_?([1-4])$", values_to = "value")
+  stopifnot(is.numeric(long$value), setequal(unique(long$var), c(irt26, "T_offset")))
+  
+  bad <- long$var != "T_offset" & !is.na(long$value) & long$value < min_temp
+  n_bad <- sum(bad)
+  long$value[bad] <- NA
+  
+  wide <- long |>
+    group_by(SubjectID, var) |>
+    summarise(value = if (all(is.na(value))) NA_real_ else mean(value, na.rm = TRUE), .groups = "drop") |>
+    pivot_wider(names_from = var, values_from = value)
+  
+  n_rounds <- long |> filter(var == "T_Max") |> group_by(SubjectID) |>
+    summarise(n_rounds = sum(!is.na(value)))
+  list(wide = left_join(wide, n_rounds, by = "SubjectID"), n_bad = n_bad)
+}
+
+rm_out <- lapply(raw, round_mean)
+sapply(rm_out, \(x) x$n_bad)                  
+lapply(rm_out, \(x) table(x$wide$n_rounds))   
+```
+
+```{r}
+clean_subject <- function(d, wide) {
+  log <- list()
+  m <- d |> select(all_of(meta_cols)) |>
+    mutate(Date = as.Date(Date, format = "%y-%m-%d"))
+  log$distance_cm_fixed <- sum(m$Distance > 5, na.rm = TRUE)
+  m$Distance <- ifelse(m$Distance > 5, m$Distance / 100, m$Distance)
+  
+  log$humidity_invalid <- sum(m$Humidity > 100, na.rm = TRUE)
+  m$Humidity[m$Humidity > 100 & !is.na(m$Humidity)] <- NA
+  
+  m$target <- m[[TARGET]]
+  log$missing_target <- sum(is.na(m$target))
+  disagree <- abs(m$aveOralF - m$aveOralM) > 1              
+  log$oral_F_M_disagree <- sum(disagree, na.rm = TRUE)
+  keep <- !is.na(m$target) & !(DROP_ORAL_DISAGREE & disagree %in% TRUE)
+  
+  out <- m |> select(-Time, -Age) |> left_join(wide, by = "SubjectID")
+  list(data = out[keep, ], log = log, flagged = out[disagree %in% TRUE, c("SubjectID", "aveOralF", "aveOralM")])
+}
+
+clean <- Map(clean_subject, raw, lapply(rm_out, `[[`, "wide"))
+do.call(rbind, lapply(clean, \(x) as.data.frame(x$log)))      
+clean$FLIR$flagged                                           
+sapply(clean, \(x) nrow(x$data))
+```
+
+For each device, this step extracts subject-level information (oral temperature, ambient conditions, demographics) and corrects data-entry errors: Distance values recorded in centimetres are converted to metres, and Humidity values above 100% are set to missing. The selected oral temperature (aveOralM) is stored in a unified target column. Subjects whose aveOralF and aveOralM differ by more than 1 °C are flagged (retained by default; they can be excluded via DROP_ORAL_DISAGREE). The result is merged with the round-averaged facial temperatures by SubjectID, giving one row per subject for modelling, together with a log of how many records each cleaning step affected.
+
+```{r}
+num_feats <- c(irt26, "T_atm", "Humidity", "Distance")
+features  <- c(num_feats)
+length(features)
+
+fit_imputer <- function(train) sapply(train[num_feats], median, na.rm = TRUE)
+apply_imputer <- function(d, med) {
+  for (v in num_feats) d[[v]][is.na(d[[v]])] <- med[[v]]
+  d
+}
+
+na_tab <- lapply(clean, \(x) colSums(is.na(x$data[features])))
+sapply(na_tab, \(v) v[v > 0])
+```
+
+## 3. Data split
+
+Subjects from both devices are pooled and randomly split 80/20
+
+```{r}
+set.seed(2026)
+ids <- bind_rows(lapply(clean, \(x) x$data[c("SubjectID", "target")])) |> distinct(SubjectID, .keep_all = TRUE)
+train_idx <- caret::createDataPartition(ids$target, p = TRAIN_FRAC, list = FALSE)
+split_tbl <- ids |> mutate(split = ifelse(row_number() %in% train_idx, "train", "test")) |> select(SubjectID, split)
+write_csv(split_tbl, sprintf("split_train_test_%s.csv", TARGET))
+
+clean <- lapply(clean, \(x) { x$data <- left_join(x$data, split_tbl, by = "SubjectID"); x })
+stopifnot(all(sapply(clean, \(x) sum(is.na(x$data$split))) == 0))
+
+bind_rows(lapply(names(clean), \(n) cbind(device = n, clean[[n]]$data))) |>
+  group_by(device, split) |>
+  summarise(n = n(), mean = mean(target), sd = sd(target), min = min(target), max = max(target),
+            n_ge_37.5 = sum(target >= 37.5), n_ge_38 = sum(target >= 38), .groups = "drop")
+```
+
+The data of both devices are combined, and histograms of the target (oral temperature) are drawn separately for the training and test sets
+
+```{r}
+all_data <- bind_rows(lapply(names(clean), \(n) cbind(device = n, clean[[n]]$data)))
+train_data <- filter(all_data, split == "train")
+
+ggplot(all_data, aes(target, fill = split)) +
+  geom_histogram(binwidth = 0.1, position = "identity", alpha = .55) +
+  facet_wrap(~device) + labs(x = paste(TARGET, "(°C)"), y = "Count", title = paste("Distribution of the target:", TARGET)) + theme_bw()
+```
+
+## 4. Model fitting and evaluation
+
+A separate random forest is fitted for each device. RFECV is first used to select predictors. During cross-validation, all participants measured on the same date are kept in the same fold. The model is trained on some dates and validated on the remaining dates.
+
+Next, `mtry` and `min.node.size` are tuned using cross-validation. The selected predictors and parameters are then used to fit the final model on the full training set. Its predictions are evaluated on the test set and compared with an all-feature random forest, a simple linear regression, and a mean-only baseline.
+
+```{r}
+# evaluate metric
+perf <- function(obs, pred) {
+  c(n = length(obs),
+    RMSE = sqrt(mean((pred - obs)^2)),
+    MAE  = mean(abs(pred - obs)),
+    R2   = 1 - sum((obs - pred)^2) / sum((obs - mean(obs))^2),
+    Bias = mean(pred - obs),                   
+    Within0.3C = mean(abs(pred - obs) <= 0.3),
+    Within0.5C = mean(abs(pred - obs) <= 0.5))
+}
+# bootstrap confidence interval
+boot_ci <- function(obs, pred, B = 1000, seed = 1) {
+  set.seed(seed); n <- length(obs)
+  bs <- replicate(B, { i <- sample.int(n, replace = TRUE); perf(obs[i], pred[i])[c("RMSE", "MAE", "R2")] })
+  apply(bs, 1, quantile, c(.025, .975))
+}
+
+# Cross-validation division by date
+make_group_folds <- function(groups, k = K_FOLDS, reps = N_REPEATS, seed = 1) {
+  set.seed(seed); idx <- list()
+  for (r in seq_len(reps)) {
+    tr <- caret::groupKFold(groups, k = k)
+    names(tr) <- sprintf("Fold%d.Rep%d", seq_len(k), r)
+    idx <- c(idx, tr)
+  }
+  list(index = idx, indexOut = lapply(idx, \(i) setdiff(seq_along(groups), i)))
+}
+
+# RFECV
+make_rfe_funcs <- function(n_res, ntree = 300) {
+  list(
+    summary = defaultSummary,
+    fit  = function(x, y, first, last, ...)
+      ranger(x = x, y = y, num.trees = ntree, importance = "permutation",
+             respect.unordered.factors = "order", num.threads = 1, seed = 1),
+    pred = function(object, x) predict(object, data = x)$predictions,
+    rank = function(object, x, y) {                    
+      imp <- object$variable.importance
+      v <- data.frame(var = names(imp), Overall = as.numeric(imp))
+      v[order(v$Overall, decreasing = TRUE), ]
+    },
+    selectSize = function(x, metric, maximize) {
+      best <- which.min(x[, metric])
+      thr  <- x[best, metric] + x[best, paste0(metric, "SD")] / sqrt(n_res)
+      x[min(which(x[, metric] <= thr)), "Variables"]
+    },
+    selectVar = function(y, size) {
+      s <- y[y$Variables == size, c("var", "Overall")]
+      freq <- table(s$var); imp <- tapply(s$Overall, s$var, mean)
+      names(imp)[order(-as.numeric(freq[names(imp)]), -imp)][seq_len(size)]
+    }
+  )
+}
+
+run_device <- function(dev, exclude = character(0)) {
+  feats <- setdiff(features, exclude)          
+  d <- clean[[dev]]$data
+  tr <- d |> filter(split == "train"); te <- d |> filter(split == "test")
+  
+  med <- fit_imputer(tr); tr <- apply_imputer(tr, med); te <- apply_imputer(te, med)
+  X_tr <- as.data.frame(tr[feats]); y_tr <- tr$target
+  X_te <- as.data.frame(te[feats]); y_te <- te$target
+  
+  folds <- make_group_folds(tr$Date)
+  n_res <- length(folds$index)
+  
+  ## (1) RFECV
+  sizes <- if (FAST) c(1:6, 8, 12, 20, length(feats)) else c(1:12, 14, 16, 18, 20, 24, 28, 32, length(feats))
+  sizes <- sort(unique(sizes[sizes <= length(feats)]))
+  rfe_fit <- rfe(X_tr, y_tr, sizes = sizes, metric = "RMSE", maximize = FALSE,
+                 rfeControl = rfeControl(functions = make_rfe_funcs(n_res, N_TREES_RFE),
+                                         method = "cv", index = folds$index, indexOut = folds$indexOut,
+                                         rerank = TRUE, saveDetails = TRUE, returnResamp = "all",
+                                         allowParallel = TRUE, verbose = FALSE))
+  sel <- predictors(rfe_fit)
+  
+  p <- length(sel)
+  grid <- expand.grid(mtry = sort(unique(pmax(1, round(c(.25, .5, .75, 1) * p)))),
+                      splitrule = "variance", min.node.size = c(3, 5, 10, 20))
+  tune <- train(x = X_tr[sel], y = y_tr, method = "ranger", metric = "RMSE", tuneGrid = grid,
+                trControl = trainControl(method = "cv", index = folds$index[1:K_FOLDS],
+                                         indexOut = folds$indexOut[1:K_FOLDS]),
+                num.trees = if (FAST) 300 else 500, respect.unordered.factors = "order",
+                importance = "permutation", seed = 1)
+  best <- tune$bestTune
+
+  fit_sel <- ranger(x = X_tr[sel], y = y_tr, num.trees = N_TREES_FINAL, mtry = best$mtry,
+                    min.node.size = best$min.node.size, importance = "permutation",
+                    respect.unordered.factors = "order", num.threads = N_CORES, seed = 1)
+
+  fit_all <- ranger(x = X_tr, y = y_tr, num.trees = N_TREES_FINAL, mtry = floor(length(feats) / 3),
+                    min.node.size = 5, importance = "permutation",
+                    respect.unordered.factors = "order", num.threads = N_CORES, seed = 1)
+
+  lm_base <- lm(target ~ canthiMax, data = tr)
+  
+  pred <- data.frame(SubjectID = te$SubjectID, Date = te$Date, obs = y_te,
+                     RF_selected = predict(fit_sel, data = X_te[sel])$predictions,
+                     RF_all      = predict(fit_all, data = X_te)$predictions,
+                     LM_canthiMax = predict(lm_base, te),
+                     Mean_only   = mean(y_tr))
+  
+  list(dev = dev, exclude = exclude, train = tr, test = te, features_sel = sel, rfe = rfe_fit, tune = tune, best = best,
+       fit_sel = fit_sel, fit_all = fit_all, pred = pred, n_res = n_res, median_imputer = med)
+}
+```
+
+```{r}
+t0 <- Sys.time()
+res <- list(FLIR = run_device("FLIR"), ICI = run_device("ICI"))
+round(difftime(Sys.time(), t0, units = "mins"), 1)
+```
+
+The cross-validated RMSE and its standard error at each feature-subset size from RFECV are collected for both devices and plotted against the number of features.
+
+```{r}
+rfe_curve <- bind_rows(lapply(res, \(r) {
+  cbind(device = r$dev, r$rfe$results[, c("Variables", "RMSE", "RMSESD")],
+        se = r$rfe$results$RMSESD / sqrt(r$n_res),
+        best_size = r$rfe$results$Variables[which.min(r$rfe$results$RMSE)],
+        chosen_size = length(r$features_sel))
+}))
+
+ggplot(rfe_curve, aes(Variables, RMSE)) +
+  geom_ribbon(aes(ymin = RMSE - se, ymax = RMSE + se), alpha = .2) +
+  geom_line() + geom_point(size = 1.5) +
+  geom_vline(aes(xintercept = best_size), linetype = 2, colour = "grey40") +
+  geom_vline(aes(xintercept = chosen_size), colour = "red") +
+  facet_wrap(~device) +
+  labs(x = "Number of features", y = "CV RMSE (°C)",
+       title = "RFECV curve (date-grouped repeated 5-fold CV)",
+       subtitle = "Dashed = min CV-RMSE; red = subset size chosen by the 1-SE rule; band = ±1 SE") +
+  theme_bw()
+```
+
+```{r}
+rfe_curve |> distinct(device, best_size, chosen_size)
+```
+
+The features selected by RFECV
+
+```{r}
+sel_tab <- bind_rows(lapply(res, \(r) {
+  k <- length(r$features_sel)
+  freq <- r$rfe$variables |> filter(Variables == k) |> count(var, name = "n_folds") |>
+    mutate(stability = n_folds / r$n_res)
+  data.frame(device = r$dev, rank = seq_len(k), feature = r$features_sel) |>
+    left_join(freq, by = c("feature" = "var")) |> select(device, rank, feature, stability)
+}))
+sel_tab
+```
+
+Features shared across devices
+
+```{r}
+Reduce(intersect, lapply(res, `[[`, "features_sel"))
+```
+
+The top five hyperparameter combinations (mtry, min.node.size), ranked by cross-validated RMSE
+
+```{r}
+lapply(res, \(r) r$tune$results |> arrange(RMSE) |> head(5) |>
+         select(mtry, min.node.size, RMSE, RMSESD, Rsquared))
+```
+
+On the test set, RMSE, MAE, R², bias, and the proportion of subjects with errors within ±0.3 °C and ±0.5 °C are computed for four models per device (the RFECV-selected random forest, a random forest on all features, a canthiMax linear-regression baseline, and a mean-only baseline) and summarised in one performance table, used to evaluate the models and compare them with other models.
+
+```{r}
+models <- c("RF_selected", "RF_all", "LM_canthiMax", "Mean_only")
+perf_tab <- bind_rows(lapply(res, \(r) {
+  bind_rows(lapply(models, \(m) data.frame(device = r$dev, model = m, t(perf(r$pred$obs, r$pred[[m]])))))
+}))
+perf_tab |> mutate(across(c(RMSE, MAE, R2, Bias), \(x) round(x, 3)),
+                   across(starts_with("Within"), \(x) round(100 * x, 1)))
+```
+
+For the main model’s test-set predictions, 95% confidence intervals for RMSE, MAE and R² are estimated with 1000 bootstrap resamples and tabulated together with the point estimates
+
+```{r}
+bind_rows(lapply(res, \(r) {
+  ci <- boot_ci(r$pred$obs, r$pred$RF_selected)
+  data.frame(device = r$dev, metric = colnames(ci),
+             lower = unname(ci[1, ]), upper = unname(ci[2, ]),
+             est = unname(perf(r$pred$obs, r$pred$RF_selected)[colnames(ci)]))
+})) |> mutate(across(where(is.numeric), \(x) round(x, 3)))
+```
+
+the main model’s predictions are plotted against the observed oral temperatures for each device, with the y = x reference line and a fitted linear trend line overlaid. This gives a visual check of prediction accuracy, systematic bias, and the degree of shrinkage towards the mean.
+
+```{r}
+pred_long <- bind_rows(lapply(res, \(r) cbind(device = r$dev, r$pred)))
+
+ggplot(pred_long, aes(obs, RF_selected)) +
+  geom_point(alpha = .4, size = 1.2) + geom_abline(slope = 1, intercept = 0, colour = "red") +
+  geom_smooth(method = "lm", se = FALSE, linewidth = .6) +
+  facet_wrap(~device) + coord_equal() +
+  labs(x = paste("Observed", TARGET, "(°C)"), y = "RF predicted (°C)",
+       title = "Test set: predicted vs observed", subtitle = "Red: y = x; blue: fitted line (slope < 1 = shrinkage towards the mean)") + theme_bw()
+```
+
+```{r}
+pred_long |>
+  mutate(stratum = ifelse(obs >= 37.5, ">= 37.5 C (fever range)", "< 37.5 C")) |>
+  group_by(device, stratum) |>
+  summarise(n = n(), RMSE = sqrt(mean((RF_selected - obs)^2)), MAE = mean(abs(RF_selected - obs)),
+            Bias = mean(RF_selected - obs), .groups = "drop") |>
+  mutate(across(c(RMSE, MAE, Bias), \(x) round(x, 3)))
+```
+
+features' importance
+
+```{r}
+imp <- bind_rows(lapply(res, \(r) {
+  v <- r$fit_sel$variable.importance
+  data.frame(device = r$dev, feature = names(v), importance = as.numeric(v))
+}))
+imp <- imp |> mutate(key = reorder(paste(device, feature, sep = "___"), importance))   
+ggplot(imp, aes(key, importance)) +
+  geom_col() + coord_flip() + facet_wrap(~device, scales = "free") +
+  scale_x_discrete(labels = \(x) sub("^.*___", "", x)) +
+  labs(x = NULL, y = "Permutation importance", title = "Permutation importance of the main model (trained on the training set)") + theme_bw()
+```
+
+# Bayesian hierarchical modelling
+
+# Reproducibility
+
+This section records the computing environment used to generate this report. All random processes were seeded (`set.seed(2026)` for the train/test split and resampling folds; `seed = 1` for `ranger`), and package versions are locked in `renv.lock`. To reproduce the results, run `renv::restore()` in the project root, then re-render this document.
+
+```{r}
+sessionInfo()
+```
+
+**Package versions.** Package versions are locked in `renv.lock` (managed with the `renv` package). To recreate the same environment:
+
+1.  Open the project folder in R (set it as the working directory).
+2.  Run `renv::restore()` to install the recorded package versions.
+3.  Place the PhysioNet data files in the `data/` folder (see the Data section for the download link).
+4.  Re-render this document (`quarto render workflow.qmd`).

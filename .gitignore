@@ -1,0 +1,7 @@
+*.Rproj
+renv/library/
+.Rproj.user/
+.Rhistory
+.RData
+*.html
+LICENSE.txt
