@@ -1,0 +1,1770 @@
+---
+title: "Predicting oral temperature from facial measurements"
+author: "Lei Huang and Shuyi Liu"
+date: "2026-10"
+lang: en
+format:
+  html:
+    theme: cosmo
+    toc: true
+    toc-depth: 2
+    number-sections: true
+    code-fold: true
+    code-summary: "Show R code"
+    code-tools: true
+    embed-resources: true
+    fig-width: 8
+    fig-height: 5
+execute:
+  echo: true
+  warning: false
+  message: false
+  error: false
+  cache: false
+params:
+  rebuild_models: false
+  compute_bayesian_r2: true
+  fit_rf: true
+  evaluate_test: true
+  repository_url: ""
+  archive_doi: ""
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+options(width = 105, knitr.kable.NA = "not computed")
+devices <- c("FLIR", "ICI")
+base_results <- file.path("results", "bayes_shared")
+report_out <- file.path("results", "combined_report")
+dir.create(report_out, recursive = TRUE, showWarnings = FALSE)
+
+# These snapshots reproduce the results supplied by the analyst.
+# Local subject-level predictions take precedence when they are available.
+snapshot_cv <- read.csv(text = "device,model,n,R2,RMSE,MAE\nFLIR,Mean baseline,817,-0.006,0.5037,0.333\nFLIR,Simple linear,817,0.620,0.3097,0.241\nFLIR,Bayesian linear,817,0.732,0.26,0.2046\nFLIR,Bayesian quadratic,817,0.762,0.24476932578279,0.191609438464173\nICI,Mean baseline,808,-0.006,0.5053,0.3337\nICI,Simple linear,808,0.646,0.2996,0.2359\nICI,Bayesian linear,808,0.745,0.2545,0.1995\nICI,Bayesian quadratic,808,0.770,0.241437783958355,0.187934163267691\n", stringsAsFactors = FALSE)
+snapshot_bayesian_r2 <- read.csv(text = "device,evaluation,estimate,posterior_sd,lower95,upper95\nFLIR,Full-training Bayesian R2,0.773,0.007,0.759,0.785\nICI,Full-training Bayesian R2,0.783,0.006,0.769,0.794\n", stringsAsFactors = FALSE)
+snapshot_intervals <- read.csv(text = "device,model,n,coverage90,mean_width90\nFLIR,linear,817,0.9119,0.8599\nICI,linear,808,0.9072,0.839\nFLIR,quadratic,817,0.910648714810282,0.811879561677439\nICI,quadratic,808,0.898514851485149,0.797594719006095\n", stringsAsFactors = FALSE)
+snapshot_diagnostics <- read.csv(text = "model,device,stage,fold,max_Rhat,min_bulk_ESS,min_tail_ESS,divergent_transitions,max_treedepth_hits\nlinear,FLIR,CV,1,1.003072,3030.557,2515.178,0,0\nlinear,FLIR,CV,2,1.002189,3414.918,2463.096,0,0\nlinear,FLIR,CV,3,1.005445,2855.838,2237.505,0,0\nlinear,FLIR,CV,4,1.00381,3010.568,2292.034,0,0\nlinear,FLIR,CV,5,1.004195,3314.181,2527.768,0,0\nlinear,FLIR,final,0,1.001427,6390.362,4908.079,0,0\nlinear,ICI,CV,1,1.002952,2733.803,2416.471,0,0\nlinear,ICI,CV,2,1.002544,3196.976,2386.733,0,0\nlinear,ICI,CV,3,1.004742,2688.689,2555.546,0,0\nlinear,ICI,CV,4,1.002545,2965.903,2422.735,0,0\nlinear,ICI,CV,5,1.002849,3187.491,2588.733,0,0\nlinear,ICI,final,0,1.00218,5933.235,4982.556,0,0\nquadratic,FLIR,CV,1,1.003888,3109.453,2446.456,0,0\nquadratic,FLIR,CV,2,1.00439,2528.666,2339.956,0,0\nquadratic,FLIR,CV,3,1.002503,3364.86,2544.573,0,0\nquadratic,FLIR,CV,4,1.002649,2716.267,2328.892,0,0\nquadratic,FLIR,CV,5,1.003509,2795.704,2431.809,0,0\nquadratic,FLIR,final,0,1.002251,6542.252,5127.458,0,0\nquadratic,ICI,CV,1,1.002159,2986.863,2652.356,0,0\nquadratic,ICI,CV,2,1.003235,3593.673,2643.089,0,0\nquadratic,ICI,CV,3,1.003148,3330.178,2563.234,0,0\nquadratic,ICI,CV,4,1.002469,3165.248,2705.78,0,0\nquadratic,ICI,CV,5,1.002476,2872.98,2218.716,0,0\nquadratic,ICI,final,0,1.001186,5548.705,5393.868,0,0\n", stringsAsFactors = FALSE)
+snapshot_prior <- read.csv(text = "\"device\",\"prior_sd\",\"n\",\"RMSE\",\"MAE\",\"mean_residual\",\"coverage90\",\"mean_width90\",\"mean_abs_prediction_change\",\"max_abs_prediction_change\",\"RMSE_change_from_reference\"\n\"FLIR\",0.2,817,0.244178535386757,0.191107734542397,-0.00236279243646477,0.914320685434517,0.809078516050306,0.00507349680921706,0.0992296930646788,-0.000590790396032742\n\"FLIR\",0.5,817,0.24476932578279,0.191609438464173,-0.00249768992600708,0.910648714810282,0.811879561677439,0,0,0\n\"FLIR\",1,817,0.244965696701994,0.191723488984826,-0.00229605248354804,0.91187270501836,0.813240016486728,0.00391262090253325,0.0352352549435366,0.000196370919203909\n\"ICI\",0.2,808,0.241369102270275,0.187590674614588,-0.00119700143893474,0.900990099009901,0.796179150433437,0.00760624086964137,0.182473257529772,-6.86816880801355e-05\n\"ICI\",0.5,808,0.241437783958355,0.187934163267691,-0.00095649559164835,0.898514851485149,0.797594719006095,0,0,0\n\"ICI\",1,808,0.241708633450538,0.188350398460499,-0.00106691946739228,0.899752475247525,0.799363618486511,0.00500201987676806,0.20259709482356,0.000270849492182618\n", stringsAsFactors = FALSE)
+snapshot_prior_diagnostics <- read.csv(text = "\"prior_sd\",\"device\",\"fold\",\"max_Rhat\",\"min_bulk_ESS\",\"min_tail_ESS\",\"divergent_transitions\",\"max_treedepth_hits\"\n0.2,\"FLIR\",1,1.00280155660182,3475.91300485186,2665.72531819802,0,0\n0.2,\"FLIR\",2,1.00387139276818,3738.65162119859,2641.55217170792,0,0\n0.2,\"FLIR\",3,1.0027231893705,3508.38257363453,2326.96215665137,0,0\n0.2,\"FLIR\",4,1.00315857810046,3817.92014469861,2440.96490236208,0,0\n0.2,\"FLIR\",5,1.00355475616763,3250.83542740255,2243.7938095518,0,0\n0.5,\"FLIR\",1,1.00388770990516,3109.45297531657,2446.45602962958,0,0\n0.5,\"FLIR\",2,1.00439035301667,2528.66556864388,2339.95586642698,0,0\n0.5,\"FLIR\",3,1.0025032320064,3364.85971332246,2544.57345372242,0,0\n0.5,\"FLIR\",4,1.00264865913268,2716.26691861513,2328.89196240874,0,0\n0.5,\"FLIR\",5,1.00350940208266,2795.70437743364,2431.80892856998,0,0\n1,\"FLIR\",1,1.00214180050525,2519.01842992093,2581.96964340751,0,0\n1,\"FLIR\",2,1.00295611727922,2247.01552509412,2560.93084002042,0,0\n1,\"FLIR\",3,1.00404042540712,2623.59035826468,2546.2171469653,0,0\n1,\"FLIR\",4,1.00335601323581,2464.00568665055,2637.68866983999,0,0\n1,\"FLIR\",5,1.0039671385538,2503.62385601074,2309.40145166086,0,0\n0.2,\"ICI\",1,1.00316103897003,3880.04500320694,2604.72962949439,0,0\n0.2,\"ICI\",2,1.00189403051927,2933.17548998009,2530.24429026913,0,0\n0.2,\"ICI\",3,1.00369509065453,3067.31782493688,2362.68475208759,0,0\n0.2,\"ICI\",4,1.00192216873584,2752.6908944529,2640.9972378219,0,0\n0.2,\"ICI\",5,1.00242255881782,2634.88081073889,2309.32008981279,0,0\n0.5,\"ICI\",1,1.00215906235025,2986.8626654151,2652.35560501731,0,0\n0.5,\"ICI\",2,1.00323549715517,3593.67280401741,2643.08896898493,0,0\n0.5,\"ICI\",3,1.00314812053544,3330.1778719448,2563.23360689944,0,0\n0.5,\"ICI\",4,1.00246912266065,3165.24784588957,2705.77992655331,0,0\n0.5,\"ICI\",5,1.00247625093974,2872.97991744589,2218.71613225323,0,0\n1,\"ICI\",1,1.0024459810577,1891.88027166186,2447.1455762844,0,0\n1,\"ICI\",2,1.00321284116575,2811.7359319468,2370.70854633435,0,0\n1,\"ICI\",3,1.0041917046031,2508.83587469671,2471.51934138249,0,0\n1,\"ICI\",4,1.00300935171481,2468.34293314404,2317.08544323547,0,0\n1,\"ICI\",5,1.0024309496329,3136.91450777687,2440.20102408094,0,0\n", stringsAsFactors = FALSE)
+
+read_or_snapshot <- function(path, snapshot) {
+  if (file.exists(path)) read.csv(path, stringsAsFactors = FALSE) else snapshot
+}
+show_table <- function(d, digits = 3, caption = NULL) {
+  knitr::kable(d, digits = digits, row.names = FALSE, caption = caption)
+}
+score_predictions <- function(observed, predicted) {
+  stopifnot(length(observed) > 1L, length(observed) == length(predicted),
+            all(is.finite(observed)), all(is.finite(predicted)))
+  residual <- observed - predicted
+  sst <- sum((observed - mean(observed))^2)
+  data.frame(n = length(observed), R2 = if (sst > 0) 1 - sum(residual^2) / sst else NA_real_,
+             RMSE = sqrt(mean(residual^2)), MAE = mean(abs(residual)))
+}
+figure_path <- function(model, device, kind) {
+  candidates <- c(file.path(base_results, model, paste0(device, "_", kind, ".png")),
+    file.path("report_assets", model, paste0(device, "_", kind, ".png")))
+  available <- candidates[file.exists(candidates)]
+  if (length(available)) available[1] else NA_character_
+}
+show_figures <- function(model, kind) {
+  paths <- vapply(devices, function(dev) figure_path(model, dev, kind), character(1))
+  if (all(!is.na(paths))) knitr::include_graphics(unname(paths)) else
+    cat("Figure files are not available in this copy. Re-render from the project root with the saved results or report_assets folder.\n")
+}
+```
+
+# Research question
+
+This project aims to predict oral reference temperature from facial infrared measurements and environmental variables using two regression approaches: regularized Bayesian Gaussian regressions and random forest regression. Using data collected with two infrared thermal imaging devices, FLIR and ICI, we investigate the relationship between these predictors and oral temperature measured with a reference thermometer.
+
+The primary Bayesian candidate retains the 29 predictors and adds one quadratic term. The primary RF uses the RFE-selected predictors and tuned forest. The choice is based on training cross-validation and residual checks. The results describe an applied modelling comparison using an existing dataset.
+
+# Running this workflow
+
+Place this document beside the existing `data`, `results` and `models` folders.
+
+| Parameter | Default | Effect |
+|------------------------|------------------------|------------------------|
+| `rebuild_models` | `false` | Reuse saved results. Setting it to `true` repeats preparation and 44 MCMC fits. |
+| `compute_bayesian_r2` | `true` | Read the two saved full-training models and summarize Bayesian R². This does not refit them. |
+| `fit_rf` | `true` | Train missing RF fits once, or reuse validated RF bundles/prediction exports. |
+| `evaluate_test` | `true` | Score the fixed Bayesian and RF models on the same supplied test subjects. |
+
+The default render reuses the existing Bayesian fits, fits any missing RF models, and runs the requested common test comparison. It also calculates CV R² from local out-of-fold predictions when available. To render a snapshot away from the project, disable both `fit_rf` and `evaluate_test`; embedded summaries and bundled figures then provide labelled results. The supplied HTML now provides rounded Bayesian R² summaries. Exact values are recomputed from local files. RF or test metrics are never filled from guesses.
+
+``` bash
+quarto render workflow_combined.qmd --to html
+```
+
+# Data and preprocessing
+
+We use version 1.0.0 of *Facial and oral temperature data from a large set of human subject volunteers*, released through PhysioNet \[1\]. The two combined CSV files contain 1,020 FLIR and 1,009 ICI subject records.
+
+The response is `aveOralM`, the mean of two oral monitor-mode readings, stored as `target` in the analysis files. Temperatures and prediction errors are measured in degrees Celsius. The analysis uses 26 facial variables, ambient temperature, relative humidity and measurement distance. `aveOralF`, identifiers, dates, demographics and `T_offset` are excluded from the predictors. The facial `T_OR` variables measure the infrared oral region and are distinct from the contact oral response.
+
+preprocessing workflow:
+
+1.  Skip the first two CSV lines, remove empty separator columns and correct `T_LC14` to `T_LC4`.
+2.  Set individual facial measurements below 30°C to missing, then calculate each variable's mean from its available rounds.
+3.  Divide `Distance > 5` by 100 and set `Humidity > 100` to missing. Record the original and replacement values.
+4.  Exclude missing responses. Flag disagreements between oral modes and retain these subjects.
+5.  Join `data/split_train_test_aveOralM.csv` by `SubjectID`. Reuse these assignments without sampling another split.
+6.  Estimate imputation and standardization separately in each CV analysis fold. Apply the fitted transformations to its assessment fold.
+
+```{r}
+#| label: prepare-shared-data
+#| eval: !expr params$rebuild_models
+#| results: hide
+
+prepare_shared_data <- function() {
+  # Reproduce the teammate's cleaning and reuse the supplied subject split.
+  # Run from the project root. This script does not fit models or score the test set.
+  # SPDX-License-Identifier: MIT
+
+  needed <- c("readr", "dplyr", "tidyr")
+  missing_packages <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing_packages)) stop("Install these packages first: ", paste(missing_packages, collapse = ", "))
+  library(readr)
+  library(dplyr)
+  library(tidyr)
+
+  DATA_DIR <- "data"
+  SPLIT_FILE <- file.path(DATA_DIR, "split_train_test_aveOralM.csv")
+  OUT_DATA <- file.path(DATA_DIR, "bayes_shared")
+  OUT_RESULTS <- file.path("results", "bayes_shared", "preparation")
+  TARGET <- "aveOralM"
+  MIN_TEMP <- 30
+  DROP_ORAL_DISAGREE <- FALSE
+  devices <- c("FLIR", "ICI")
+  raw_files <- setNames(file.path(DATA_DIR, paste0(devices, "_groups1and2.csv")), devices)
+  required <- c(raw_files, SPLIT_FILE)
+  if (any(!file.exists(required))) {
+    stop("Missing input files. Check getwd() and these paths: ",
+         paste(required[!file.exists(required)], collapse = ", "))
+  }
+  dir.create(OUT_DATA, recursive = TRUE, showWarnings = FALSE)
+  dir.create(OUT_RESULTS, recursive = TRUE, showWarnings = FALSE)
+
+  meta_cols <- c("SubjectID", "aveOralF", "aveOralM", "Gender", "Age", "Ethnicity",
+                 "T_atm", "Humidity", "Distance", "Cosmetics", "Time", "Date")
+  irt26 <- c(
+    "Max1R13", "Max1L13", "aveAllR13", "aveAllL13",
+    "T_RC", "T_RC_Dry", "T_RC_Wet", "T_RC_Max",
+    "T_LC", "T_LC_Dry", "T_LC_Wet", "T_LC_Max", "RCC", "LCC",
+    "canthiMax", "canthi4Max", "T_FHCC", "T_FHRC", "T_FHLC", "T_FHBC",
+    "T_FHTC", "T_FH_Max", "T_FHC_Max", "T_Max", "T_OR", "T_OR_Max"
+  )
+  features <- c(irt26, "T_atm", "Humidity", "Distance")
+  stopifnot(length(features) == 29L)
+
+  read_irt <- function(path) {
+    d <- read_csv(path, skip = 2, na = c("", "NA"), show_col_types = FALSE,
+                  name_repair = function(x) ifelse(x == "", paste0("blank", seq_along(x)), x)) |>
+      rename_with(~ sub("^T_LC14$", "T_LC4", .x)) |>
+      select(-starts_with("blank"))
+    stopifnot(!anyDuplicated(d$SubjectID), !anyNA(d$SubjectID),
+              !anyDuplicated(names(d)), all(meta_cols %in% names(d)))
+    d$SubjectID <- as.character(d$SubjectID)
+    d
+  }
+
+  # Exactly the peer's value-level filter and available-round averaging.
+  # T_offset is aggregated but is not included in the 29 predictors.
+  round_mean <- function(d) {
+    long <- d |>
+      select(SubjectID, all_of(setdiff(names(d), meta_cols))) |>
+      pivot_longer(-SubjectID, names_to = c("var", "round"),
+                   names_pattern = "^(.*?)_?([1-4])$", values_to = "value")
+    stopifnot(is.numeric(long$value), !anyNA(long$var),
+              setequal(unique(long$var), c(irt26, "T_offset")))
+    bad <- long$var != "T_offset" & !is.na(long$value) & long$value < MIN_TEMP
+    flagged <- as.data.frame(long[bad, c("SubjectID", "var", "round", "value")])
+    long$value[bad] <- NA_real_
+    wide <- long |>
+      group_by(SubjectID, var) |>
+      summarise(value = if (all(is.na(value))) NA_real_ else mean(value, na.rm = TRUE),
+                .groups = "drop") |>
+      pivot_wider(names_from = var, values_from = value)
+    counts <- long |>
+      group_by(SubjectID, var) |>
+      summarise(n_valid = sum(!is.na(value)), .groups = "drop")
+    n_rounds <- counts |> filter(var == "T_Max") |>
+      select(SubjectID, n_rounds = n_valid)
+    list(wide = left_join(wide, n_rounds, by = "SubjectID"),
+         counts = counts, flagged = flagged, n_bad = sum(bad))
+  }
+
+  clean_subject <- function(d, aggregated) {
+    m <- d |> select(all_of(meta_cols)) |>
+      mutate(Date = as.Date(Date, format = "%y-%m-%d"))
+    distance_bad <- which(!is.na(m$Distance) & m$Distance > 5)
+    humidity_bad <- which(!is.na(m$Humidity) & m$Humidity > 100)
+    corrections <- rbind(
+      data.frame(SubjectID = m$SubjectID[distance_bad], variable = rep("Distance", length(distance_bad)),
+                 original = m$Distance[distance_bad], replacement = m$Distance[distance_bad] / 100),
+      data.frame(SubjectID = m$SubjectID[humidity_bad], variable = rep("Humidity", length(humidity_bad)),
+                 original = m$Humidity[humidity_bad], replacement = rep(NA_real_, length(humidity_bad)))
+    )
+    m$Distance <- ifelse(m$Distance > 5, m$Distance / 100, m$Distance)
+    m$Humidity[m$Humidity > 100 & !is.na(m$Humidity)] <- NA_real_
+    m$target <- m[[TARGET]]
+    disagree <- abs(m$aveOralF - m$aveOralM) > 1
+    keep <- !is.na(m$target) & !(DROP_ORAL_DISAGREE & disagree %in% TRUE)
+    out <- m |> select(-Time, -Age) |> left_join(aggregated$wide, by = "SubjectID")
+    list(data = out[keep, ], corrections = corrections,
+         disagreement = as.data.frame(out[disagree %in% TRUE, c("SubjectID", "aveOralF", "aveOralM")]),
+         log = data.frame(raw_subjects = nrow(d), retained_subjects = sum(keep),
+                          facial_values_below_cutoff = aggregated$n_bad,
+                          distance_divided_by_100 = length(distance_bad),
+                          humidity_set_missing = length(humidity_bad),
+                          missing_target = sum(is.na(m$target)),
+                          oral_modes_disagree = sum(disagree, na.rm = TRUE)))
+  }
+
+  # Read the supplied assignments. No random split is generated.
+  split_tbl <- read_csv(SPLIT_FILE, col_types = cols(.default = col_character()),
+                        show_col_types = FALSE) |>
+    select(SubjectID, split) |>
+    mutate(SubjectID = trimws(SubjectID), split = tolower(trimws(split)))
+  stopifnot(nrow(split_tbl) > 0, !anyNA(split_tbl),
+            all(nzchar(split_tbl$SubjectID)), !anyDuplicated(split_tbl$SubjectID),
+            setequal(unique(split_tbl$split), c("train", "test")))
+
+  raw <- lapply(raw_files, read_irt)
+  aggregated <- lapply(raw, round_mean)
+  clean <- Map(clean_subject, raw, aggregated)
+  all_ids <- unique(unlist(lapply(clean, function(x) x$data$SubjectID), use.names = FALSE))
+  unassigned <- setdiff(all_ids, split_tbl$SubjectID)
+  if (length(unassigned)) stop("The supplied split omits these subjects: ", paste(unassigned, collapse = ", "))
+  extra_ids <- setdiff(split_tbl$SubjectID, all_ids)
+  if (length(extra_ids)) warning("The split contains ", length(extra_ids), " IDs absent from the retained data.")
+
+  # Check that a shared ID refers to the same response and acquisition date.
+  paired <- merge(as.data.frame(clean$FLIR$data[, c("SubjectID", "target", "Date")]),
+                  as.data.frame(clean$ICI$data[, c("SubjectID", "target", "Date")]),
+                  by = "SubjectID", suffixes = c("_FLIR", "_ICI"))
+  stopifnot(all(abs(paired$target_FLIR - paired$target_ICI) < 1e-8),
+            !anyNA(paired$Date_FLIR), !anyNA(paired$Date_ICI),
+            all(paired$Date_FLIR == paired$Date_ICI))
+
+  summary_rows <- list()
+  missing_rows <- list()
+  for (dev in devices) {
+    d <- clean[[dev]]$data |> left_join(split_tbl, by = "SubjectID")
+    fields <- c("SubjectID", "Date", "split", "target", features)
+    d <- as.data.frame(d[, fields])
+    stopifnot(!anyNA(d$split), !anyNA(d$Date),
+              all(vapply(d[features], is.numeric, logical(1))),
+              all(vapply(d[features], function(x) all(is.na(x) | is.finite(x)), logical(1))))
+    tr <- d[d$split == "train", , drop = FALSE]
+    te <- d[d$split == "test", , drop = FALSE]
+    stopifnot(nrow(tr) > 1L, nrow(te) > 0L,
+              length(intersect(tr$SubjectID, te$SubjectID)) == 0L)
+
+    # Preserve missing predictors for later fold-specific CV preprocessing.
+    write.csv(tr, file.path(OUT_DATA, paste0(dev, "_train_unimputed.csv")), row.names = FALSE)
+    write.csv(te, file.path(OUT_DATA, paste0(dev, "_test_unimputed.csv")), row.names = FALSE)
+
+    # Match the peer's final-fit/test preprocessing: medians from training only.
+    med <- vapply(tr[features], median, numeric(1), na.rm = TRUE)
+    if (any(!is.finite(med))) stop("An entire training predictor is missing for ", dev, ".")
+    tr_imp <- tr
+    te_imp <- te
+    for (v in features) {
+      tr_imp[[v]][is.na(tr_imp[[v]])] <- med[[v]]
+      te_imp[[v]][is.na(te_imp[[v]])] <- med[[v]]
+    }
+    write.csv(tr_imp, file.path(OUT_DATA, paste0(dev, "_train_imputed.csv")), row.names = FALSE)
+    write.csv(te_imp, file.path(OUT_DATA, paste0(dev, "_test_imputed.csv")), row.names = FALSE)
+    write.csv(data.frame(variable = features, median = unname(med)),
+              file.path(OUT_RESULTS, paste0(dev, "_training_medians.csv")), row.names = FALSE)
+    write.csv(aggregated[[dev]]$counts, file.path(OUT_RESULTS, paste0(dev, "_valid_round_counts.csv")), row.names = FALSE)
+    write.csv(aggregated[[dev]]$flagged, file.path(OUT_RESULTS, paste0(dev, "_below_cutoff_values.csv")), row.names = FALSE)
+    write.csv(clean[[dev]]$corrections, file.path(OUT_RESULTS, paste0(dev, "_metadata_corrections.csv")), row.names = FALSE)
+    write.csv(clean[[dev]]$disagreement, file.path(OUT_RESULTS, paste0(dev, "_oral_mode_flags.csv")), row.names = FALSE)
+    summary_rows[[dev]] <- cbind(device = dev, clean[[dev]]$log,
+                                 n_train = nrow(tr), n_test = nrow(te), predictors = length(features))
+    missing_rows[[dev]] <- data.frame(device = dev, variable = features,
+                                      train_missing = colSums(is.na(tr[features])),
+                                      test_missing = colSums(is.na(te[features])))
+  }
+  summary_table <- do.call(rbind, summary_rows)
+  write.csv(summary_table, file.path(OUT_RESULTS, "preparation_summary.csv"), row.names = FALSE)
+  write.csv(do.call(rbind, missing_rows), file.path(OUT_RESULTS, "missing_predictors.csv"), row.names = FALSE)
+  write.csv(split_tbl, file.path(OUT_DATA, "supplied_subject_split.csv"), row.names = FALSE)
+  writeLines(features, file.path(OUT_DATA, "predictor_names.txt"))
+  dictionary <- data.frame(variable = c("target", features),
+                           unit = c("degrees C", rep("degrees C", 26), "degrees C", "percent", "m"),
+                           meaning = c("aveOralM: mean of two oral monitor-mode readings",
+                                       rep("Available-round facial mean after the peer's cutoff rule", 26),
+                                       "Ambient temperature", "Relative humidity", "Measurement distance"))
+  write.csv(dictionary, file.path(OUT_RESULTS, "variable_dictionary.csv"), row.names = FALSE)
+  checksums <- tools::md5sum(required)
+  write.csv(data.frame(file = names(checksums), algorithm = "MD5", checksum = unname(checksums)),
+            file.path(OUT_RESULTS, "input_checksums.csv"), row.names = FALSE)
+  saveRDS(list(devices = devices, features = features, target = "target", source_target = TARGET,
+               split_file = SPLIT_FILE, cutoff = MIN_TEMP, drop_oral_disagree = DROP_ORAL_DISAGREE,
+               input_checksums = checksums, output_data = OUT_DATA),
+          file.path(OUT_DATA, "preparation.rds"))
+  writeLines(c(
+    "Source DOI 10.13026/3bhc-9065; version 1.0.0; CC0 data; MIT project code.",
+    "Cleaning mirrors the teammate's original workflow.qmd (preprocessing only); raw source files remain unchanged.",
+    "Value-level cutoff: facial values <30 degrees C become missing; T_offset is exempt.",
+    "Each facial predictor is averaged over its own available rounds.",
+    "Distance >5 is divided by 100; this reproduces the peer's unit-error assumption.",
+    "Humidity >100 becomes missing. Oral-mode disagreements are flagged and retained.",
+    "T_offset, subject identifiers, date, demographics and other oral measurements are not predictors.",
+    "The supplied SubjectID split is reused. No new train/test split was sampled.",
+    "Final-fit medians use training observations only; missing values are also retained in separate CV input files.",
+    "Pilot Bayesian work used FLIR round 1 and a different split; new results describe this shared-data protocol.",
+    "Test outcomes were not scored or used for model selection by this preparation script."
+  ), file.path(OUT_RESULTS, "preparation_record.txt"))
+  writeLines(capture.output(sessionInfo()), file.path(OUT_RESULTS, "sessionInfo.txt"))
+  cat("\nShared-data preparation summary:\n")
+  print(summary_table, row.names = FALSE)
+  cat("\nDifferent subjects across devices:", length(all_ids),
+      "; shared subjects:", nrow(paired), "\n")
+  cat("\nSaved predictor count:", length(features), "\n")
+  cat("Saved data to", OUT_DATA, "and logs to", OUT_RESULTS, "\n")
+}
+prepare_shared_data()
+```
+
+# Bayesian regression
+
+The baseline predicts the analysis-fold mean oral temperature. The simple linear regression uses `canthiMax`. Each Bayesian model uses all 29 predictors with analysis-fold median imputation and standardization. The response remains in degrees Celsius.
+
+For the linear model,
+
+$$
+y_i \sim \operatorname{Normal}(\mu_i,\sigma^2),\qquad
+\mu_i=\alpha+\sum_{j=1}^{29}\beta_j z_{ij}.
+$$
+
+The quadratic candidate adds $\gamma q_i$, where $q_i$ is the standardized square of standardized `canthiMax`. Its center and scale are also estimated from the analysis fold. The main `canthiMax` term remains in the model.
+
+The reference priors are
+
+$$
+\alpha\sim\operatorname{Normal}(37,1^2),\qquad
+\beta_j,\gamma\sim\operatorname{Normal}(0,0.5^2),\qquad
+\sigma\sim\operatorname{Exponential}(2).
+$$
+
+These priors regularize the correlated facial predictors. Individual coefficients describe conditional associations and do not establish causal effects. The model has no group-level random effects, so it is described as Bayesian regression rather than hierarchical regression.
+
+We use `brms` with the `rstan` backend and four NUTS chains \[3\]. CV fits use 2,000 iterations per chain, including 1,000 warmup iterations. The full-training fits use 4,000 iterations, including 2,000 warmup iterations. The sampler controls are `adapt_delta = 0.99` and `max_treedepth = 12`.
+
+## Cross-validation design
+
+Within the supplied training set, all subjects from the same acquisition date are assigned to the same fold. One saved five-fold date map is shared by the two Bayesian device analyses and their linear/quadratic candidates. Imputation, scaling and quadratic transformations use only the analysis rows of each fold.
+
+Point predictions are posterior means of the expected response from `posterior_epred`. The 90% prediction intervals use the 5th and 95th percentiles of `posterior_predict`, including residual variation. Every subject contributes one held-out prediction to the pooled CV scores.
+
+The Bayesian CV map is exported. Direct comparison with random forest CV scores requires the same actual folds and preprocessing within folds. The supplied subject split is already shared for the later final evaluation.
+
+```{r}
+#| label: fit-bayesian-candidates
+#| eval: !expr params$rebuild_models
+#| results: hide
+
+fit_bayesian_candidate <- function(add_quadratic) {
+  # Fit separate Bayesian regressions to the shared FLIR and ICI data.
+  # Run 01_restart_prepare.R first. Test observations are not read by this script.
+  # Default: establish a new 29-predictor Gaussian linear baseline.
+  # SPDX-License-Identifier: MIT
+
+  needed <- c("brms", "posterior", "bayesplot", "ggplot2")
+  missing_packages <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing_packages)) stop("Install these packages first: ", paste(missing_packages, collapse = ", "))
+  library(brms)
+
+  ADD_QUADRATIC <- add_quadratic
+  SEED <- 20261018L
+  K <- 5L
+  CORES <- 2L
+  DATA_DIR <- file.path("data", "bayes_shared")
+  config_file <- file.path(DATA_DIR, "preparation.rds")
+  if (!file.exists(config_file)) stop("Run 01_restart_prepare.R from the project root first.")
+  config <- readRDS(config_file)
+  features <- config$features
+  devices <- config$devices
+  stopifnot(length(features) == 29L,
+            identical(features, readLines(file.path(DATA_DIR, "predictor_names.txt"))),
+            !any(c("SubjectID", "Date", "split", "target", "aveOralM", "aveOralF", "T_offset") %in% features))
+  model_name <- if (ADD_QUADRATIC) "quadratic" else "linear"
+  OUT <- file.path("results", "bayes_shared", model_name)
+  MODELS <- file.path("models", "bayes_shared", model_name)
+  dir.create(OUT, recursive = TRUE, showWarnings = FALSE)
+  dir.create(MODELS, recursive = TRUE, showWarnings = FALSE)
+
+  train_files <- setNames(file.path(DATA_DIR, paste0(devices, "_train_unimputed.csv")), devices)
+  training <- lapply(train_files, function(path) {
+    d <- read.csv(path, stringsAsFactors = FALSE)
+    d$Date <- as.Date(d$Date)
+    stopifnot(!anyDuplicated(d$SubjectID), all(d$split == "train"),
+              !anyNA(d$Date), all(is.finite(d$target)), all(features %in% names(d)))
+    d
+  })
+
+  # A common date-to-fold map for both Bayesian device analyses.
+  # This map is separate from the supplied train/test split, which is unchanged.
+  # RF CV scores require the same map to be directly compared with these CV scores.
+  subject_dates <- do.call(rbind, lapply(training, function(d) d[, c("SubjectID", "Date")]))
+  if (any(vapply(split(subject_dates$Date, subject_dates$SubjectID),
+                 function(x) length(unique(x)) != 1L, logical(1)))) {
+    stop("A subject has inconsistent dates across devices.")
+  }
+  dates <- sort(unique(subject_dates$Date))
+  if (length(dates) < K) stop("Fewer than five training dates are available.")
+  set.seed(SEED)
+  date_map <- data.frame(Date = dates, fold = sample(rep(seq_len(K), length.out = length(dates))))
+  write.csv(date_map, file.path(OUT, "cv_date_map.csv"), row.names = FALSE)
+
+  # Fit median imputation and z-scoring on the analysis observations only.
+  prepare_data <- function(analysis_raw, assessment_raw = NULL) {
+    a <- analysis_raw[, c("target", features), drop = FALSE]
+    b <- if (is.null(assessment_raw)) NULL else assessment_raw[, c("target", features), drop = FALSE]
+    med <- vapply(a[features], median, numeric(1), na.rm = TRUE)
+    if (any(!is.finite(med))) stop("A predictor is entirely missing in an analysis fold.")
+    center <- spread <- setNames(numeric(length(features)), features)
+    for (v in features) {
+      a[[v]][is.na(a[[v]])] <- med[[v]]
+      if (!is.null(b)) b[[v]][is.na(b[[v]])] <- med[[v]]
+      center[[v]] <- mean(a[[v]])
+      spread[[v]] <- sd(a[[v]])
+      if (!is.finite(spread[[v]]) || spread[[v]] == 0) spread[[v]] <- 1
+      a[[v]] <- (a[[v]] - center[[v]]) / spread[[v]]
+      if (!is.null(b)) b[[v]] <- (b[[v]] - center[[v]]) / spread[[v]]
+    }
+    parameters <- data.frame(variable = features, median = unname(med),
+                              center = unname(center), scale = unname(spread),
+                              transformation = "median imputation then z-score of the round mean")
+    if (ADD_QUADRATIC) {
+      square <- a$canthiMax^2
+      q_center <- mean(square)
+      q_scale <- sd(square)
+      if (!is.finite(q_scale) || q_scale == 0) q_scale <- 1
+      a$canthiMax_sq <- (square - q_center) / q_scale
+      if (!is.null(b)) b$canthiMax_sq <- (b$canthiMax^2 - q_center) / q_scale
+      parameters <- rbind(parameters, data.frame(
+        variable = "canthiMax_sq", median = NA_real_, center = q_center, scale = q_scale,
+        transformation = "z-score of squared z-scored canthiMax"))
+    }
+    stopifnot(all(is.finite(as.matrix(a))))
+    if (!is.null(b)) stopifnot(all(is.finite(as.matrix(b))))
+    list(analysis = a, assessment = b, parameters = parameters)
+  }
+
+  model_formula <- reformulate(c(features, if (ADD_QUADRATIC) "canthiMax_sq"), response = "target")
+  model_priors <- c(prior(normal(37, 1), class = "Intercept"),
+                    prior(normal(0, 0.5), class = "b"),
+                    prior(exponential(2), class = "sigma"))
+  fit_model <- function(data, template = NULL, seed, final = FALSE) {
+    iterations <- if (final) 4000L else 2000L
+    warmup <- if (final) 2000L else 1000L
+    control <- list(adapt_delta = 0.99, max_treedepth = 12)
+    if (is.null(template)) {
+      brm(model_formula, data = data, family = gaussian(), prior = model_priors,
+          backend = "rstan", chains = 4, cores = CORES, iter = iterations,
+          warmup = warmup, seed = seed, refresh = 500, control = control)
+    } else {
+      update(template, newdata = data, chains = 4, cores = CORES, iter = iterations,
+             warmup = warmup, seed = seed, refresh = 500, control = control)
+    }
+  }
+
+  all_diagnostics <- list()
+  check_fit <- function(fit, device, stage, fold) {
+    ds <- posterior::summarise_draws(posterior::as_draws_array(fit))
+    pars <- ds[grepl("^b_|^sigma$", ds$variable), , drop = FALSE]
+    nuts <- nuts_params(fit)
+    d <- data.frame(device = device, stage = stage, fold = fold,
+                    max_Rhat = max(pars$rhat), min_bulk_ESS = min(pars$ess_bulk),
+                    min_tail_ESS = min(pars$ess_tail),
+                    divergent_transitions = sum(nuts$Parameter == "divergent__" & nuts$Value > 0),
+                    max_treedepth_hits = sum(nuts$Parameter == "treedepth__" & nuts$Value >= 12))
+    write.csv(ds, file.path(OUT, sprintf("%s_%s_%d_posterior_summary.csv", device, stage, fold)), row.names = FALSE)
+    write.csv(d, file.path(OUT, sprintf("%s_%s_%d_diagnostics.csv", device, stage, fold)), row.names = FALSE)
+    numbers <- unlist(d[, c("max_Rhat", "min_bulk_ESS", "min_tail_ESS",
+                            "divergent_transitions", "max_treedepth_hits")])
+    if (any(!is.finite(numbers)) || d$max_Rhat >= 1.01 ||
+        d$min_bulk_ESS < 400 || d$min_tail_ESS < 400 || d$divergent_transitions > 0) {
+      stop("Review saved diagnostics for ", device, " ", stage, " ", fold, ".")
+    }
+    if (d$max_treedepth_hits > 0) warning("Some transitions reached maximum tree depth.")
+    d
+  }
+  score <- function(y, predicted) {
+    c(RMSE = sqrt(mean((y - predicted)^2)), MAE = mean(abs(y - predicted)))
+  }
+
+  comparisons <- list()
+  intervals <- list()
+  all_assignments <- list()
+  template <- NULL
+  for (device_index in seq_along(devices)) {
+    dev <- devices[device_index]
+    train <- training[[dev]]
+    fold_id <- date_map$fold[match(train$Date, date_map$Date)]
+    stopifnot(!anyNA(fold_id), setequal(fold_id, seq_len(K)))
+    all_assignments[[dev]] <- data.frame(device = dev, train[, c("SubjectID", "Date")], fold = fold_id)
+    write.csv(do.call(rbind, all_assignments), file.path(OUT, "cv_assignments.csv"), row.names = FALSE)
+    oof <- data.frame(device = dev, SubjectID = train$SubjectID, Date = train$Date,
+                      fold = fold_id, observed = train$target,
+                      mean_baseline = NA_real_, simple_linear = NA_real_,
+                      predicted = NA_real_, lower90 = NA_real_, upper90 = NA_real_)
+
+    for (k in seq_len(K)) {
+      cat("\n", dev, model_name, ": CV fold", k, "of", K, "\n")
+      held_out <- fold_id == k
+      prepared <- prepare_data(train[!held_out, , drop = FALSE], train[held_out, , drop = FALSE])
+      write.csv(prepared$parameters, file.path(OUT, sprintf("%s_preprocessing_fold_%d.csv", dev, k)), row.names = FALSE)
+      seed_k <- SEED + 100L * device_index + k
+      fit <- fit_model(prepared$analysis, template, seed_k)
+      saveRDS(fit, file.path(MODELS, sprintf("%s_cv_fold_%d.rds", dev, k)))
+      d <- check_fit(fit, dev, "CV", k)
+      all_diagnostics[[length(all_diagnostics) + 1L]] <- d
+      write.csv(do.call(rbind, all_diagnostics), file.path(OUT, "sampling_diagnostics.csv"), row.names = FALSE)
+
+      oof$mean_baseline[held_out] <- mean(prepared$analysis$target)
+      simple <- lm(target ~ canthiMax, data = prepared$analysis)
+      oof$simple_linear[held_out] <- predict(simple, newdata = prepared$assessment)
+      oof$predicted[held_out] <- colMeans(posterior_epred(fit, newdata = prepared$assessment))
+      set.seed(seed_k + 10000L)
+      yrep <- posterior_predict(fit, newdata = prepared$assessment, ndraws = 2000)
+      bounds <- apply(yrep, 2, quantile, probs = c(0.05, 0.95))
+      oof$lower90[held_out] <- bounds[1, ]
+      oof$upper90[held_out] <- bounds[2, ]
+      write.csv(oof, file.path(OUT, paste0(dev, "_oof_predictions.csv")), row.names = FALSE)
+      template <- fit
+    }
+    stopifnot(all(complete.cases(oof)))
+    comparisons[[dev]] <- do.call(rbind, lapply(
+      c(Mean_baseline = "mean_baseline", Simple_linear = "simple_linear", Bayesian = "predicted"),
+      function(column) data.frame(device = dev, prediction_column = column,
+                                  as.list(score(oof$observed, oof[[column]])))
+    ))
+    intervals[[dev]] <- data.frame(device = dev, model = model_name, n = nrow(oof),
+      coverage90 = mean(oof$observed >= oof$lower90 & oof$observed <= oof$upper90),
+      mean_width90 = mean(oof$upper90 - oof$lower90))
+    write.csv(do.call(rbind, comparisons), file.path(OUT, "cv_comparison.csv"), row.names = FALSE)
+    write.csv(do.call(rbind, intervals), file.path(OUT, "cv_intervals.csv"), row.names = FALSE)
+
+    png(file.path(OUT, paste0(dev, "_oof_residuals.png")), width = 1350, height = 1050, res = 160)
+    error <- oof$observed - oof$predicted
+    plot(oof$predicted, error, pch = 16, col = adjustcolor("steelblue", alpha.f = 0.4),
+         xlab = "Predicted oral temperature (degrees C)", ylab = "Observed - predicted (degrees C)",
+         main = paste(dev, "out-of-fold residuals"))
+    abline(h = 0, lty = 2, col = "gray60")
+    lines(lowess(oof$predicted, error), col = "firebrick", lwd = 2)
+    dev.off()
+
+    # Refit the declared model on the full outer training set after CV.
+    cat("\n", dev, ": final fit on", nrow(train), "training subjects\n")
+    full <- prepare_data(train)
+    final_seed <- SEED + 100L * device_index + 99L
+    final_fit <- fit_model(full$analysis, template, final_seed, final = TRUE)
+    saveRDS(final_fit, file.path(MODELS, paste0(dev, "_final_fit.rds")))
+    d <- check_fit(final_fit, dev, "final", 0L)
+    all_diagnostics[[length(all_diagnostics) + 1L]] <- d
+    write.csv(do.call(rbind, all_diagnostics), file.path(OUT, "sampling_diagnostics.csv"), row.names = FALSE)
+    write.csv(full$parameters, file.path(OUT, paste0(dev, "_final_preprocessing.csv")), row.names = FALSE)
+    beta <- fixef(final_fit, probs = c(0.025, 0.975))
+    write.csv(data.frame(term = rownames(beta), beta, row.names = NULL, check.names = FALSE),
+              file.path(OUT, paste0(dev, "_coefficients_95.csv")), row.names = FALSE)
+    saveRDS(list(device = dev, fit = final_fit, model_name = model_name,
+                  features = features, add_quadratic = ADD_QUADRATIC,
+                  preprocessing = full$parameters, training_subject_ids = train$SubjectID,
+                  supplied_split_file = config$split_file,
+                  preparation_input_checksums = config$input_checksums,
+                  diagnostics = d, diagnostics_passed = TRUE),
+            file.path(MODELS, paste0(dev, "_final_bundle.rds")))
+    writeLines(capture.output(summary(final_fit)), file.path(OUT, paste0(dev, "_summary.txt")))
+    draws <- posterior::as_draws_array(final_fit)
+    key <- if (ADD_QUADRATIC) "b_canthiMax_sq" else "b_canthiMax"
+    trace <- bayesplot::mcmc_trace(draws, pars = c(key, "sigma"))
+    ggplot2::ggsave(file.path(OUT, paste0(dev, "_trace.png")), plot = trace, width = 8, height = 5, dpi = 180)
+    set.seed(final_seed)
+    ppc <- pp_check(final_fit, type = "dens_overlay", ndraws = 50)
+    ggplot2::ggsave(file.path(OUT, paste0(dev, "_posterior_predictive.png")), plot = ppc, width = 8, height = 5, dpi = 180)
+    template <- final_fit
+  }
+
+  writeLines(c(
+    paste("Model:", model_name),
+    "Target: aveOralM stored as target; response and errors in degrees Celsius.",
+    "Devices are fitted separately. Basis: 26 round-mean facial variables and 3 environmental predictors.",
+    "Shared input cleaning and supplied train/test assignments come from the preparation code in this document.",
+    "CV: one five-fold date-grouped map, shared across these Bayesian device fits; seed 20261018.",
+    "The supplied RF outer split is unchanged. The Bayesian CV map is exported; it is not asserted to equal the RF's repeated RFE folds.",
+    "CV preprocessing: analysis-fold medians, then analysis-fold centering and scaling.",
+    "Priors: Intercept normal(37,1); coefficients normal(0,0.5); sigma exponential(rate=2).",
+    "CV: 4 chains, iter 2000, warmup 1000. Full training: 4 chains, iter 4000, warmup 2000.",
+    "Sampler controls: adapt_delta 0.99, max_treedepth 12; rstan backend.",
+    "CV fitting seed: 20261018 + 100*device_index + fold; predictive seed adds 10000.",
+    "Final fitting seed: 20261018 + 100*device_index + 99; PPC uses that final seed.",
+    "Point predictions: posterior_epred means. Intervals: posterior_predict 5th and 95th percentiles.",
+    "RMSE and MAE are pooled over subjects, rather than averaging fold RMSE values.",
+    "This script reads training files only. Test outcomes have not been scored by this script.",
+    "Previous pilot work used a different split. Do not claim this supplied test set was never involved in any prior exploration without checking its IDs.",
+    "Code MIT; source data CC0; dataset DOI 10.13026/3bhc-9065, version 1.0.0."
+  ), file.path(OUT, "model_record.txt"))
+  hashes <- tools::md5sum(c(config_file, train_files))
+  write.csv(data.frame(file = names(hashes), algorithm = "MD5", checksum = unname(hashes)),
+            file.path(OUT, "fitting_input_checksums.csv"), row.names = FALSE)
+  writeLines(capture.output(sessionInfo()), file.path(OUT, "sessionInfo.txt"))
+  cat("\nPooled five-fold comparison (degrees C):\n")
+  print(do.call(rbind, comparisons), row.names = FALSE, digits = 4)
+  cat("\nBayesian prediction intervals:\n")
+  print(do.call(rbind, intervals), row.names = FALSE, digits = 4)
+  cat("\nSampling diagnostics:\n")
+  print(do.call(rbind, all_diagnostics), row.names = FALSE, digits = 7)
+  cat("\nSaved results to", OUT, "and models to", MODELS, "\n")
+  cat("The supplied test set is ready for a later common final evaluation.\n")
+}
+fit_bayesian_candidate(FALSE)
+fit_bayesian_candidate(TRUE)
+```
+
+## Prior sensitivity
+
+We hold the selected quadratic structure fixed and vary the coefficient prior standard deviation between 0.2, 0.5 and 1.0. The intercept and residual-scale priors remain unchanged. The saved SD 0.5 predictions are reused, while SD 0.2 and 1.0 require 20 additional CV fits. This check assesses robustness; SD 0.5 remains the reference prior.
+
+```{r}
+#| label: run-prior-sensitivity
+#| eval: !expr params$rebuild_models
+#| results: hide
+
+run_shared_prior_sensitivity <- function() {
+  # Prior sensitivity for the shared-data FLIR and ICI quadratic regressions.
+  # Put this file in the project root, then run:
+  # source("03_shared_prior_sensitivity.R")
+  # Run after 02_restart_bayes.R has completed with ADD_QUADRATIC <- TRUE.
+  # Reuse the saved SD 0.5 reference; fit SD 0.2 and 1.0 in five folds per device.
+  # This requires 20 new CV fits. The model structure stays fixed.
+  # SPDX-License-Identifier: MIT
+
+  needed <- c("brms", "posterior")
+  missing_packages <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing_packages)) stop("Install these packages first: ", paste(missing_packages, collapse = ", "))
+  library(brms)
+
+  SEED <- 20261018L
+  K <- 5L
+  CORES <- 2L
+  ADD_QUADRATIC <- TRUE
+  REFERENCE_SD <- 0.5
+  PRIOR_SDS <- c(0.2, 0.5, 1.0)
+  DATA_DIR <- file.path("data", "bayes_shared")
+  REF <- file.path("results", "bayes_shared", "quadratic")
+  OUT <- file.path("results", "bayes_shared", "quadratic_prior_sensitivity")
+  MODELS <- file.path("models", "bayes_shared", "quadratic_prior_sensitivity")
+  config_file <- file.path(DATA_DIR, "preparation.rds")
+  if (!file.exists(config_file)) stop("Run the shared-data preparation and quadratic scripts first.")
+  config <- readRDS(config_file)
+  features <- config$features
+  devices <- config$devices
+  stopifnot(length(features) == 29L, !anyDuplicated(features),
+            "canthiMax" %in% features, setequal(devices, c("FLIR", "ICI")),
+            !any(c("SubjectID", "Date", "split", "target", "aveOralM", "aveOralF", "T_offset") %in% features))
+
+  train_files <- setNames(file.path(DATA_DIR, paste0(devices, "_train_unimputed.csv")), devices)
+  reference_files <- file.path(REF, paste0(devices, "_oof_predictions.csv"))
+  preprocessing_files <- unlist(lapply(devices, function(dev) {
+    file.path(REF, sprintf("%s_preprocessing_fold_%d.csv", dev, seq_len(K)))
+  }))
+  summary_files <- unlist(lapply(devices, function(dev) {
+    file.path(REF, sprintf("%s_CV_%d_posterior_summary.csv", dev, seq_len(K)))
+  }))
+  input_files <- c(config_file, train_files, reference_files, preprocessing_files,
+    summary_files, file.path(REF, c("cv_date_map.csv", "sampling_diagnostics.csv",
+                                   "fitting_input_checksums.csv", "model_record.txt")))
+  missing_files <- input_files[!file.exists(input_files)]
+  if (length(missing_files)) stop("Missing files: ", paste(missing_files, collapse = ", "))
+
+  # Confirm that the training inputs have not changed since the reference fits.
+  reference_hashes <- read.csv(file.path(REF, "fitting_input_checksums.csv"), stringsAsFactors = FALSE)
+  current_hashes <- tools::md5sum(c(config_file, train_files))
+  hash_index <- match(names(current_hashes), reference_hashes$file)
+  stopifnot(!anyNA(hash_index),
+            all(reference_hashes$algorithm[hash_index] == "MD5"),
+            all(tolower(reference_hashes$checksum[hash_index]) == tolower(unname(current_hashes))))
+  reference_record <- readLines(file.path(REF, "model_record.txt"), warn = FALSE)
+  stopifnot("Model: quadratic" %in% reference_record,
+            any(grepl("coefficients normal(0,0.5)", reference_record, fixed = TRUE)))
+
+  training <- lapply(train_files, function(path) {
+    d <- read.csv(path, stringsAsFactors = FALSE)
+    d$Date <- as.Date(d$Date)
+    stopifnot(!anyDuplicated(d$SubjectID), all(d$split == "train"),
+              !anyNA(d$Date), all(is.finite(d$target)), all(features %in% names(d)))
+    d
+  })
+  date_map <- read.csv(file.path(REF, "cv_date_map.csv"), stringsAsFactors = FALSE)
+  date_map$Date <- as.Date(date_map$Date)
+  stopifnot(!anyNA(date_map), !anyDuplicated(date_map$Date), setequal(date_map$fold, seq_len(K)))
+
+  check_diagnostics <- function(d) {
+    columns <- c("max_Rhat", "min_bulk_ESS", "min_tail_ESS",
+                 "divergent_transitions", "max_treedepth_hits")
+    stopifnot(nrow(d) > 0L, all(columns %in% names(d)))
+    if (any(!is.finite(as.matrix(d[, columns, drop = FALSE]))) ||
+        any(d$max_Rhat >= 1.01) || any(d$min_bulk_ESS < 400) ||
+        any(d$min_tail_ESS < 400) || any(d$divergent_transitions > 0)) {
+      stop("Review saved sampling diagnostics before comparing predictions.")
+    }
+    if (any(d$max_treedepth_hits > 0)) warning("Some transitions reached maximum tree depth.")
+  }
+  diagnostic_columns <- c("device", "fold", "max_Rhat", "min_bulk_ESS", "min_tail_ESS",
+                          "divergent_transitions", "max_treedepth_hits")
+  reference_diag <- read.csv(file.path(REF, "sampling_diagnostics.csv"), stringsAsFactors = FALSE)
+  reference_diag <- reference_diag[reference_diag$stage == "CV", diagnostic_columns, drop = FALSE]
+  stopifnot(nrow(reference_diag) == length(devices) * K)
+  for (dev in devices) {
+    rows <- reference_diag[reference_diag$device == dev, , drop = FALSE]
+    stopifnot(nrow(rows) == K, setequal(rows$fold, seq_len(K)))
+  }
+  check_diagnostics(reference_diag)
+
+  # Use exactly the preprocessing function from 02_restart_bayes.R.
+  # Every median, center, scale and quadratic transformation uses analysis rows only.
+  prepare_data <- function(analysis_raw, assessment_raw = NULL) {
+    a <- analysis_raw[, c("target", features), drop = FALSE]
+    b <- if (is.null(assessment_raw)) NULL else assessment_raw[, c("target", features), drop = FALSE]
+    med <- vapply(a[features], median, numeric(1), na.rm = TRUE)
+    if (any(!is.finite(med))) stop("A predictor is entirely missing in an analysis fold.")
+    center <- spread <- setNames(numeric(length(features)), features)
+    for (v in features) {
+      a[[v]][is.na(a[[v]])] <- med[[v]]
+      if (!is.null(b)) b[[v]][is.na(b[[v]])] <- med[[v]]
+      center[[v]] <- mean(a[[v]])
+      spread[[v]] <- sd(a[[v]])
+      if (!is.finite(spread[[v]]) || spread[[v]] == 0) spread[[v]] <- 1
+      a[[v]] <- (a[[v]] - center[[v]]) / spread[[v]]
+      if (!is.null(b)) b[[v]] <- (b[[v]] - center[[v]]) / spread[[v]]
+    }
+    parameters <- data.frame(variable = features, median = unname(med),
+                              center = unname(center), scale = unname(spread),
+                              transformation = "median imputation then z-score of the round mean")
+    if (ADD_QUADRATIC) {
+      square <- a$canthiMax^2
+      q_center <- mean(square)
+      q_scale <- sd(square)
+      if (!is.finite(q_scale) || q_scale == 0) q_scale <- 1
+      a$canthiMax_sq <- (square - q_center) / q_scale
+      if (!is.null(b)) b$canthiMax_sq <- (b$canthiMax^2 - q_center) / q_scale
+      parameters <- rbind(parameters, data.frame(
+        variable = "canthiMax_sq", median = NA_real_, center = q_center, scale = q_scale,
+        transformation = "z-score of squared z-scored canthiMax"))
+    }
+    stopifnot(all(is.finite(as.matrix(a))))
+    if (!is.null(b)) stopifnot(all(is.finite(as.matrix(b))))
+    list(analysis = a, assessment = b, parameters = parameters)
+  }
+
+  dir.create(OUT, recursive = TRUE, showWarnings = FALSE)
+  dir.create(MODELS, recursive = TRUE, showWarnings = FALSE)
+  reference <- prepared_folds <- list()
+  prediction_columns <- c("device", "SubjectID", "Date", "fold", "observed", "predicted", "lower90", "upper90")
+  for (dev in devices) {
+    train <- training[[dev]]
+    fold_id <- date_map$fold[match(train$Date, date_map$Date)]
+    stopifnot(!anyNA(fold_id), setequal(fold_id, seq_len(K)))
+    r <- read.csv(file.path(REF, paste0(dev, "_oof_predictions.csv")), stringsAsFactors = FALSE)
+    stopifnot(all(prediction_columns %in% names(r)), !anyDuplicated(r$SubjectID),
+              nrow(r) == nrow(train), setequal(r$SubjectID, train$SubjectID))
+    r <- r[match(train$SubjectID, r$SubjectID), prediction_columns, drop = FALSE]
+    r$Date <- as.Date(r$Date)
+    stopifnot(all(complete.cases(r)), all(r$device == dev), all(r$fold == fold_id),
+              all(r$Date == train$Date), isTRUE(all.equal(r$observed, train$target)),
+              all(is.finite(as.matrix(r[, c("observed", "predicted", "lower90", "upper90")]))),
+              all(r$lower90 <= r$upper90))
+    reference[[dev]] <- r
+    prepared_folds[[dev]] <- vector("list", K)
+    for (k in seq_len(K)) {
+      held_out <- fold_id == k
+      p <- prepare_data(train[!held_out, , drop = FALSE], train[held_out, , drop = FALSE])
+      previous <- read.csv(file.path(REF, sprintf("%s_preprocessing_fold_%d.csv", dev, k)),
+                           stringsAsFactors = FALSE)
+      numeric_columns <- c("median", "center", "scale")
+      stopifnot(identical(previous$variable, p$parameters$variable),
+                isTRUE(all.equal(previous[, numeric_columns], p$parameters[, numeric_columns],
+                                 tolerance = 1e-8, check.attributes = FALSE)))
+      write.csv(p$parameters, file.path(OUT, sprintf("%s_preprocessing_fold_%d.csv", dev, k)), row.names = FALSE)
+      p$rows <- held_out
+      prepared_folds[[dev]][[k]] <- p
+    }
+  }
+  write.csv(date_map, file.path(OUT, "cv_date_map.csv"), row.names = FALSE)
+
+  extract_quadratic <- function(ds, device, prior_sd, fold) {
+    row <- ds[ds$variable == "b_canthiMax_sq", , drop = FALSE]
+    stopifnot(nrow(row) == 1L)
+    data.frame(device = device, prior_sd = prior_sd, fold = fold,
+               posterior_mean = row$mean, posterior_sd = row$sd,
+               lower90 = row$q5, upper90 = row$q95)
+  }
+  predictions <- lapply(reference, function(d) data.frame(prior_sd = REFERENCE_SD, d))
+  diagnostics <- list(data.frame(prior_sd = REFERENCE_SD, reference_diag))
+  quadratic_summaries <- list()
+  for (dev in devices) for (k in seq_len(K)) {
+    ds <- read.csv(file.path(REF, sprintf("%s_CV_%d_posterior_summary.csv", dev, k)), stringsAsFactors = FALSE)
+    quadratic_summaries[[length(quadratic_summaries) + 1L]] <- extract_quadratic(ds, dev, REFERENCE_SD, k)
+  }
+
+  # Save provenance before starting the new fits.
+  writeLines(c(
+    "Source data DOI 10.13026/3bhc-9065; version 1.0.0; CC0. Code MIT.",
+    "Separate FLIR and ICI Gaussian regressions; target aveOralM stored as target, in degrees Celsius.",
+    "Predictors: 26 available-round facial means, T_atm, Humidity, Distance, and one quadratic term.",
+    "Quadratic term: standardized square of analysis-fold standardized canthiMax.",
+    "Model extension was examined after training OOF residuals suggested curvature.",
+    "Reference coefficient prior: normal(0,0.5). Reuse its saved OOF predictions and fold summaries.",
+    "Only coefficient prior SD changes: 0.2, 0.5, 1.0, including the quadratic coefficient.",
+    "Fixed priors: Intercept normal(37,1); residual sigma exponential(rate=2).",
+    "SD 0.5 remains the reference; this check does not automatically select the lowest-error prior.",
+    "Reuse the actual saved five-fold date map; verify reference input hashes, IDs, outcomes and preprocessing.",
+    "All medians and transformations use the analysis rows of each fold only.",
+    "Point prediction: mean posterior_epred. 90% prediction interval: posterior_predict 5th and 95th percentiles.",
+    "New fits: 2 prior settings x 2 devices x 5 folds = 20 CV fits. No new full-training refits here.",
+    "Sampler: rstan; 4 chains; iter 2000; warmup 1000; adapt_delta 0.99; max_treedepth 12.",
+    "Fitting seed: 20261018 + 100*device_index + fold. Predictive seed adds 10000. Predictive draws: 2000.",
+    "Compiled code is reused only within one prior setting; a fresh brm call starts the next setting.",
+    "Diagnostics: Rhat <1.01; bulk/tail ESS >=400; zero divergent transitions; tree-depth hits reported.",
+    "Pooled scores weight subjects equally. Repeated runs overwrite this sensitivity output folder.",
+    "Fold-specific coefficient summaries are separate posteriors with fold-specific transformations.",
+    "These CV results support model development; use the common final evaluation for final performance reporting.",
+    "This script reads training observations and their CV results only. Previous pilot analyses used another split."
+  ), file.path(OUT, "method_record.txt"))
+  checksum_paths <- unique(c(input_files, if (file.exists("workflow_combined.qmd")) "workflow_combined.qmd"))
+  hashes <- tools::md5sum(checksum_paths)
+  write.csv(data.frame(file = names(hashes), algorithm = "MD5", checksum = unname(hashes)),
+            file.path(OUT, "input_checksums.csv"), row.names = FALSE)
+  writeLines(capture.output(sessionInfo()), file.path(OUT, "sessionInfo.txt"))
+
+  model_formula <- reformulate(c(features, "canthiMax_sq"), response = "target")
+  for (sd_b in PRIOR_SDS[PRIOR_SDS != REFERENCE_SD]) {
+    tag <- gsub(".", "p", sprintf("%.1f", sd_b), fixed = TRUE)
+    priors <- c(set_prior("normal(37, 1)", class = "Intercept"),
+                set_prior(sprintf("normal(0, %.1f)", sd_b), class = "b"),
+                set_prior("exponential(2)", class = "sigma"))
+    template <- NULL
+    for (device_index in seq_along(devices)) {
+      dev <- devices[device_index]
+      candidate <- reference[[dev]]
+      candidate[, c("predicted", "lower90", "upper90")] <- NA_real_
+      for (k in seq_len(K)) {
+        cat("\n", dev, ": prior SD", sd_b, "; CV fold", k, "of", K, "\n")
+        p <- prepared_folds[[dev]][[k]]
+        seed_k <- SEED + 100L * device_index + k
+        control <- list(adapt_delta = 0.99, max_treedepth = 12)
+        if (is.null(template)) {
+          fit <- brm(model_formula, data = p$analysis, family = gaussian(), prior = priors,
+                     backend = "rstan", chains = 4, cores = CORES, iter = 2000,
+                     warmup = 1000, seed = seed_k, refresh = 500, control = control)
+        } else {
+          fit <- update(template, newdata = p$analysis, chains = 4, cores = CORES,
+                        iter = 2000, warmup = 1000, seed = seed_k, refresh = 500, control = control)
+        }
+        stem <- sprintf("%s_prior_sd_%s_fold_%d", dev, tag, k)
+        saveRDS(fit, file.path(MODELS, paste0(stem, ".rds")))
+        ds <- posterior::summarise_draws(posterior::as_draws_array(fit))
+        pars <- ds[grepl("^b_|^sigma$", ds$variable), , drop = FALSE]
+        nuts <- nuts_params(fit)
+        d <- data.frame(prior_sd = sd_b, device = dev, fold = k,
+          max_Rhat = max(pars$rhat), min_bulk_ESS = min(pars$ess_bulk), min_tail_ESS = min(pars$ess_tail),
+          divergent_transitions = sum(nuts$Parameter == "divergent__" & nuts$Value > 0),
+          max_treedepth_hits = sum(nuts$Parameter == "treedepth__" & nuts$Value >= 12))
+        diagnostics[[length(diagnostics) + 1L]] <- d
+        write.csv(do.call(rbind, diagnostics), file.path(OUT, "diagnostics.csv"), row.names = FALSE)
+        write.csv(ds, file.path(OUT, paste0(stem, "_posterior_summary.csv")), row.names = FALSE)
+        check_diagnostics(d)
+        quadratic_summaries[[length(quadratic_summaries) + 1L]] <- extract_quadratic(ds, dev, sd_b, k)
+
+        candidate$predicted[p$rows] <- colMeans(posterior_epred(fit, newdata = p$assessment))
+        set.seed(seed_k + 10000L)
+        yrep <- posterior_predict(fit, newdata = p$assessment, ndraws = 2000)
+        bounds <- apply(yrep, 2, quantile, probs = c(0.05, 0.95))
+        candidate$lower90[p$rows] <- bounds[1, ]
+        candidate$upper90[p$rows] <- bounds[2, ]
+        write.csv(candidate, file.path(OUT, sprintf("%s_oof_prior_sd_%s.csv", dev, tag)), row.names = FALSE)
+        template <- fit
+      }
+      stopifnot(all(complete.cases(candidate)))
+      predictions[[length(predictions) + 1L]] <- data.frame(prior_sd = sd_b, candidate)
+    }
+  }
+
+  all_predictions <- do.call(rbind, predictions)
+  all_predictions <- all_predictions[order(all_predictions$device, all_predictions$prior_sd,
+                                           all_predictions$SubjectID), ]
+  all_diagnostics <- do.call(rbind, diagnostics)
+  all_diagnostics <- all_diagnostics[order(all_diagnostics$device, all_diagnostics$prior_sd,
+                                           all_diagnostics$fold), ]
+  quadratic_coefficients <- do.call(rbind, quadratic_summaries)
+  quadratic_coefficients <- quadratic_coefficients[order(quadratic_coefficients$device,
+    quadratic_coefficients$prior_sd, quadratic_coefficients$fold), ]
+
+  score <- function(d) {
+    error <- d$observed - d$predicted
+    data.frame(n = nrow(d), RMSE = sqrt(mean(error^2)), MAE = mean(abs(error)),
+      mean_residual = mean(error),
+      coverage90 = mean(d$observed >= d$lower90 & d$observed <= d$upper90),
+      mean_width90 = mean(d$upper90 - d$lower90))
+  }
+  comparison <- fold_scores <- list()
+  for (dev in devices) for (sd_b in PRIOR_SDS) {
+    d <- all_predictions[all_predictions$device == dev & all_predictions$prior_sd == sd_b, ]
+    r <- reference[[dev]]
+    ref_prediction <- r$predicted[match(d$SubjectID, r$SubjectID)]
+    change <- d$predicted - ref_prediction
+    comparison[[length(comparison) + 1L]] <- data.frame(device = dev, prior_sd = sd_b, score(d),
+      mean_abs_prediction_change = mean(abs(change)), max_abs_prediction_change = max(abs(change)),
+      RMSE_change_from_reference = sqrt(mean((d$observed - d$predicted)^2)) -
+        sqrt(mean((r$observed - r$predicted)^2)))
+    for (k in seq_len(K)) {
+      fold_scores[[length(fold_scores) + 1L]] <- data.frame(device = dev, prior_sd = sd_b,
+        fold = k, score(d[d$fold == k, , drop = FALSE]))
+    }
+  }
+  comparison <- do.call(rbind, comparison)
+  write.csv(comparison, file.path(OUT, "comparison.csv"), row.names = FALSE)
+  write.csv(do.call(rbind, fold_scores), file.path(OUT, "fold_scores.csv"), row.names = FALSE)
+  write.csv(all_predictions, file.path(OUT, "oof_predictions.csv"), row.names = FALSE)
+  write.csv(all_diagnostics, file.path(OUT, "diagnostics.csv"), row.names = FALSE)
+  write.csv(quadratic_coefficients, file.path(OUT, "quadratic_coefficients_by_fold.csv"), row.names = FALSE)
+  writeLines(capture.output(sessionInfo()), file.path(OUT, "sessionInfo.txt"))
+
+  cat("\nPrior sensitivity: pooled five-fold results (degrees C)\n")
+  print(comparison, row.names = FALSE, digits = 4)
+  cat("\nSampling diagnostics (including reused reference)\n")
+  print(all_diagnostics, row.names = FALSE, digits = 7)
+  cat("\nSaved results to", OUT, "and new CV models to", MODELS, "\n")
+  cat("This check assesses robustness to coefficient priors. SD 0.5 remains the reference.\n")
+}
+run_shared_prior_sensitivity()
+```
+
+# Random forest regression
+
+Separate random forest models were fitted for FLIR and ICI to predict oral temperature using 29 facial and environmental predictors. Missing values were replaced with the corresponding training-set medians. RFECV selected predictors using permutation importance and five-fold cross-validation repeated three times. Participants measured on the same date were kept in the same fold, so a collection date could not appear in both training and validation data within a run. A one-standard-error rule favoured fewer predictors when RMSE values were similar. The selected predictors were then used to tune mtry and min.node.size by cross-validation. The final model contained 1,000 trees. A second forest using all predictors was fitted as a reference, and the models and selection results were saved. Because imputation was performed before internal cross-validation, its errors may be optimistic. The main comparison with Bayesian regression therefore used the shared test set.
+
+```{r}
+#| label: random-forest-component
+#| results: hide
+
+make_group_folds <- function(groups, k = 5L, reps = 3L, seed = 1) {
+  set.seed(seed); idx <- list()
+  for (r in seq_len(reps)) {
+    tr <- caret::groupKFold(groups, k = k)
+    names(tr) <- sprintf("Fold%d.Rep%d", seq_len(k), r)
+    idx <- c(idx, tr)
+  }
+  list(index = idx, indexOut = lapply(idx, \(i) setdiff(seq_along(groups), i)))
+}
+
+# RFECV
+make_rfe_funcs <- function(n_res, ntree = 300) {
+  list(
+    summary = caret::defaultSummary,
+    fit  = function(x, y, first, last, ...)
+      ranger::ranger(x = x, y = y, num.trees = ntree, importance = "permutation",
+             respect.unordered.factors = "order", num.threads = 1, seed = 1),
+    pred = function(object, x) predict(object, data = x)$predictions,
+    rank = function(object, x, y) {                    
+      imp <- object$variable.importance
+      v <- data.frame(var = names(imp), Overall = as.numeric(imp))
+      v[order(v$Overall, decreasing = TRUE), ]
+    },
+    selectSize = function(x, metric, maximize) {
+      best <- which.min(x[, metric])
+      thr  <- x[best, metric] + x[best, paste0(metric, "SD")] / sqrt(n_res)
+      x[min(which(x[, metric] <= thr)), "Variables"]
+    },
+    selectVar = function(y, size) {
+      s <- y[y$Variables == size, c("var", "Overall")]
+      freq <- table(s$var); imp <- tapply(s$Overall, s$var, mean)
+      names(imp)[order(-as.numeric(freq[names(imp)]), -imp)][seq_len(size)]
+    }
+  )
+}
+
+# RFE, one-SE rule, tuning grid and final forest settings.
+
+fit_shared_random_forests <- function(force = FALSE) {
+  cfg <- readRDS(file.path("data", "bayes_shared", "preparation.rds"))
+  features <- cfg$features
+  devices <- cfg$devices
+  OUT_RF <- file.path("results", "rf_shared")
+  MODELS_RF <- file.path("models", "rf_shared")
+  dir.create(OUT_RF, recursive = TRUE, showWarnings = FALSE)
+  dir.create(MODELS_RF, recursive = TRUE, showWarnings = FALSE)
+  needed_devices <- devices[vapply(devices, function(dev) {
+    has_bundle <- file.exists(file.path(MODELS_RF, paste0(dev, "_final_bundle.rds")))
+    has_predictions <- file.exists(file.path(OUT_RF, paste0(dev, "_test_predictions.csv"))) &&
+      file.exists(file.path(OUT_RF, paste0(dev, "_training_ids.csv")))
+    force || !(has_bundle || has_predictions)
+  }, logical(1))]
+  if (!length(needed_devices)) {
+    cat("Saved RF bundles or exported predictions are available; RF fitting is skipped.\n")
+    return(invisible(NULL))
+  }
+  needed <- c("caret", "ranger", "doParallel")
+  missing <- needed[!vapply(needed, requireNamespace, logical(1), quietly = TRUE)]
+  if (length(missing)) stop("Install RF packages in this project: ", paste(missing, collapse = ", "))
+  library(caret)
+  library(ranger)
+  library(doParallel)
+  set.seed(2026)
+  FAST <- FALSE
+  N_CORES <- 2L
+  K_FOLDS <- 5L
+  N_REPEATS <- 3L
+  N_TREES_RFE <- 300L
+  N_TREES_FINAL <- 1000L
+  cluster <- parallel::makePSOCKcluster(N_CORES)
+  doParallel::registerDoParallel(cluster)
+  on.exit({
+    parallel::stopCluster(cluster)
+    foreach::registerDoSEQ()
+  }, add = TRUE)
+
+
+
+  for (dev in needed_devices) {
+    train_path <- file.path("data", "bayes_shared", paste0(dev, "_train_unimputed.csv"))
+    tr <- read.csv(train_path, stringsAsFactors = FALSE)
+    tr$Date <- as.Date(tr$Date)
+    stopifnot(all(tr$split == "train"), !anyDuplicated(tr$SubjectID), !anyNA(tr$Date),
+              all(is.finite(tr$target)), length(features) == 29L)
+    feats <- features
+    med <- vapply(tr[feats], median, numeric(1), na.rm = TRUE)
+    stopifnot(all(is.finite(med)))
+    for (v in feats) tr[[v]][is.na(tr[[v]])] <- med[[v]]
+    X_tr <- as.data.frame(tr[feats])
+    y_tr <- tr$target
+    stopifnot(all(is.finite(as.matrix(X_tr))))
+
+    folds <- make_group_folds(tr$Date)
+    n_res <- length(folds$index)
+    stopifnot(n_res == K_FOLDS * N_REPEATS)
+    assignments <- do.call(rbind, lapply(seq_along(folds$indexOut), function(i) {
+      rows <- folds$indexOut[[i]]
+      data.frame(device = dev, SubjectID = tr$SubjectID[rows], Date = tr$Date[rows],
+                 resample = names(folds$indexOut)[i])
+    }))
+    write.csv(assignments, file.path(OUT_RF, paste0(dev, "_cv_assignments.csv")), row.names = FALSE)
+    sizes <- sort(unique(c(1:12, 14, 16, 18, 20, 24, 28, 32, length(feats))))
+    sizes <- sizes[sizes <= length(feats)]
+    rfe_fit <- rfe(X_tr, y_tr, sizes = sizes, metric = "RMSE", maximize = FALSE,
+      rfeControl = rfeControl(functions = make_rfe_funcs(n_res, N_TREES_RFE),
+        method = "cv", index = folds$index, indexOut = folds$indexOut,
+        rerank = TRUE, saveDetails = TRUE, returnResamp = "all",
+        allowParallel = TRUE, verbose = FALSE))
+    sel <- predictors(rfe_fit)
+    stopifnot(length(sel) > 0L, all(sel %in% feats))
+    p <- length(sel)
+    grid <- expand.grid(mtry = sort(unique(pmax(1, round(c(.25, .5, .75, 1) * p)))),
+                         splitrule = "variance", min.node.size = c(3, 5, 10, 20))
+    tune <- train(x = X_tr[sel], y = y_tr, method = "ranger", metric = "RMSE", tuneGrid = grid,
+      trControl = trainControl(method = "cv", index = folds$index[1:K_FOLDS],
+                                indexOut = folds$indexOut[1:K_FOLDS]),
+      num.trees = 500, respect.unordered.factors = "order", importance = "permutation", seed = 1)
+    best <- tune$bestTune
+    fit_sel <- ranger(x = X_tr[sel], y = y_tr, num.trees = N_TREES_FINAL, mtry = best$mtry,
+      min.node.size = best$min.node.size, importance = "permutation",
+      respect.unordered.factors = "order", num.threads = N_CORES, seed = 1)
+    fit_all <- ranger(x = X_tr, y = y_tr, num.trees = N_TREES_FINAL,
+      mtry = floor(length(feats) / 3), min.node.size = 5, importance = "permutation",
+      respect.unordered.factors = "order", num.threads = N_CORES, seed = 1)
+    bundle <- list(device = dev, protocol = "peer-rf-shared-split-v1", fit_selected = fit_sel,
+      fit_all = fit_all, features = feats, features_selected = sel, median_imputer = med,
+      training_subject_ids = tr$SubjectID, training_file_checksum = unname(tools::md5sum(train_path)),
+      rfe = rfe_fit, tune = tune, best = best, n_res = n_res,
+      imputation_scope = "Outer-training medians before RF inner resampling",
+      origin = "Training-only adaptation of the collaborator's supplied workflow.qmd")
+    saveRDS(bundle, file.path(MODELS_RF, paste0(dev, "_final_bundle.rds")))
+    write.csv(data.frame(SubjectID = tr$SubjectID), file.path(OUT_RF, paste0(dev, "_training_ids.csv")), row.names = FALSE)
+    write.csv(data.frame(device = dev, rank = seq_along(sel), feature = sel),
+      file.path(OUT_RF, paste0(dev, "_selected_features.csv")), row.names = FALSE)
+    write.csv(rfe_fit$results, file.path(OUT_RF, paste0(dev, "_rfe_results.csv")), row.names = FALSE)
+    write.csv(tune$results, file.path(OUT_RF, paste0(dev, "_tuning_results.csv")), row.names = FALSE)
+    write.csv(best, file.path(OUT_RF, paste0(dev, "_best_parameters.csv")), row.names = FALSE)
+    write.csv(data.frame(feature = names(fit_sel$variable.importance),
+      importance = unname(fit_sel$variable.importance)),
+      file.path(OUT_RF, paste0(dev, "_importance.csv")), row.names = FALSE)
+    cat("\n", dev, ": RF models saved with", length(sel), "selected predictors.\n")
+  }
+  writeLines(c(
+    "Algorithm adapted from the collaborator's original workflow.qmd; no new subject split is drawn.",
+    "Separate devices; 29 available-round facial/environmental predictors; response aveOralM in Celsius.",
+    "Peer RF preprocessing: medians from the outer training set are applied before RF resampling.",
+    "This allows some assessment-predictor information into inner preprocessing; RF inner scores are development scores.",
+    "Final test predictors receive only training medians; test responses are not used for tuning or selection.",
+    "RFE: 3 x 5 acquisition-date folds, 300 trees, permutation reranking, peer one-SE subset rule.",
+    "Tuning: first five RFE folds; mtry fractions 0.25/0.5/0.75/1, node sizes 3/5/10/20, 500 trees.",
+    "Final forests: 1000 trees. Selected-feature forest is the primary RF; all-feature forest is a reference.",
+    "RNG seed 2026; group-fold helper seed 1; ranger seed 1; two registered workers.",
+    "Do not compare RF tuning scores directly with Bayesian pooled CV scores; the main comparison uses the same test subjects."
+  ), file.path(OUT_RF, "method_record.txt"))
+  writeLines(capture.output(sessionInfo()), file.path(OUT_RF, "sessionInfo.txt"))
+  invisible(NULL)
+}
+
+if (isTRUE(params$fit_rf)) fit_shared_random_forests()
+```
+
+## RF selection and tuning summaries
+
+The selected predictors are reported separately for FLIR and ICI. For each device, the five parameter combinations with the lowest training cross-validation RMSE are displayed, including mtry, min.node.size, mean RMSE and its standard deviation across folds. These are model-development results rather than final test performance.
+
+```{r}
+#| label: rf-selected-features
+#| results: asis
+
+for (dev in devices) {
+  path <- file.path("results", "rf_shared", paste0(dev, "_selected_features.csv"))
+  cat("\n\n### ", dev, " selected predictors\n\n", sep = "")
+  if (file.exists(path)) {
+    cat(as.character(show_table(read.csv(path))), sep = "\n")
+  } else cat("Selected predictor details will be available after RF fitting or export.\n")
+  path <- file.path("results", "rf_shared", paste0(dev, "_tuning_results.csv"))
+  if (file.exists(path)) {
+    tuning <- read.csv(path)
+    tuning <- tuning[order(tuning$RMSE), ]
+    cat("\n\nTop five training-CV tuning settings:\n\n")
+    cat(as.character(show_table(head(tuning[, c("mtry", "min.node.size", "RMSE", "RMSESD")], 5))), sep = "\n")
+  }
+}
+```
+
+The tuning scores above support RF model development. The shared test R² below is recalculated as `1 - SSE/SST`
+
+```{r}
+#| label: fig-rf-rfe
+#| echo: false
+#| fig-cap: "RF feature-selection development curves. Error bars show the peer's RMSESD/sqrt(15) heuristic."
+
+rfe_curves <- list()
+for (dev in devices) {
+  path <- file.path("results", "rf_shared", paste0(dev, "_rfe_results.csv"))
+  if (file.exists(path)) {
+    d <- read.csv(path)
+    d$device <- dev
+    d$se <- d$RMSESD / sqrt(15)
+    rfe_curves[[dev]] <- d
+  }
+}
+if (length(rfe_curves) && requireNamespace("ggplot2", quietly = TRUE)) {
+  d <- do.call(rbind, rfe_curves)
+  ggplot2::ggplot(d, ggplot2::aes(Variables, RMSE)) +
+    ggplot2::geom_line() + ggplot2::geom_point() +
+    ggplot2::geom_errorbar(ggplot2::aes(ymin = RMSE - se, ymax = RMSE + se), width = 0.3) +
+    ggplot2::facet_wrap(~device) + ggplot2::theme_bw() +
+    ggplot2::labs(x = "Number of predictors", y = "Development CV RMSE (degrees C)")
+} else cat("RF development curves are not available in this project copy.\n")
+```
+
+Horizontal bar charts display predictor permutation importance separately for FLIR and ICI. Higher values indicate a greater contribution to prediction. The horizontal layout makes predictor names easy to read, while ordering the bars helps compare importance.
+
+```{r}
+#| label: fig-rf-importance
+#| echo: false
+#| fig-cap: "Permutation importance in the final training RF fits. Correlated predictors can share importance."
+
+rf_importance <- list()
+for (dev in devices) {
+  path <- file.path("results", "rf_shared", paste0(dev, "_importance.csv"))
+  if (file.exists(path)) {
+    d <- read.csv(path)
+    d$device <- dev
+    d$key <- paste(dev, d$feature, sep = "___")
+    rf_importance[[dev]] <- d
+  }
+}
+if (length(rf_importance) && requireNamespace("ggplot2", quietly = TRUE)) {
+  d <- do.call(rbind, rf_importance)
+  ggplot2::ggplot(d, ggplot2::aes(reorder(key, importance), importance)) +
+    ggplot2::geom_col() + ggplot2::coord_flip() +
+    ggplot2::facet_wrap(~device, scales = "free") + ggplot2::theme_bw() +
+    ggplot2::scale_x_discrete(labels = function(x) sub("^.*___", "", x)) +
+    ggplot2::labs(x = NULL, y = "Permutation importance")
+} else cat("RF importance values are not available in this project copy.\n")
+```
+
+# Bayesian results
+
+## Analysis population
+
+```{r}
+#| label: data-overview
+
+population_snapshot <- data.frame(device = devices, raw_subjects = c(1020, 1009),
+  n_train = c(817, 808), n_test = c(203L, 201L), predictors = 29L)
+population <- read_or_snapshot(file.path(base_results, "preparation", "preparation_summary.csv"),
+                               population_snapshot)
+show_table(population[, c("device", "raw_subjects", "n_train", "n_test", "predictors")], digits = 0)
+```
+
+The snapshot records training and test counts from the successfully rendered Bayesian report. Local preparation logs take precedence. Device counts should not be added and described as independent volunteers.
+
+## Predictive performance
+
+We calculate predictive R² and RMSE from pooled held-out predictions:
+
+$$
+R^2_{\mathrm{CV}}=1-\frac{\sum_i(y_i-\hat y_i)^2}{\sum_i(y_i-\bar y)^2},\qquad
+\mathrm{RMSE}_{\mathrm{CV}}=\sqrt{\frac{1}{n}\sum_i(y_i-\hat y_i)^2}.
+$$
+
+The denominator uses the mean of the observations in this pooled evaluation. This R² definition can be negative. We use the same definition for all predictive comparisons; it differs from squared correlation \[6\].
+
+```{r}
+#| label: cv-metrics
+
+cv_metrics <- snapshot_cv
+cv_metrics$source <- "Supplied HTML R2 (rounded); saved CV summaries"
+oof_store <- list()
+for (dev in devices) {
+  oof_store[[dev]] <- list()
+  for (candidate in c("linear", "quadratic")) {
+    path <- file.path(base_results, candidate, paste0(dev, "_oof_predictions.csv"))
+    if (file.exists(path)) {
+      d <- read.csv(path, stringsAsFactors = FALSE)
+      required <- c("SubjectID", "Date", "fold", "observed", "predicted", "mean_baseline", "simple_linear")
+      stopifnot(all(required %in% names(d)), !anyDuplicated(d$SubjectID),
+                all(complete.cases(d[, required])), setequal(d$fold, 1:5),
+                all(vapply(split(d$fold, d$Date), function(x) length(unique(x)) == 1L, logical(1))))
+      oof_store[[dev]][[candidate]] <- d
+    }
+  }
+  if (length(oof_store[[dev]]) == 2L) {
+    a <- oof_store[[dev]]$linear
+    b <- oof_store[[dev]]$quadratic
+    stopifnot(setequal(a$SubjectID, b$SubjectID))
+    b <- b[match(a$SubjectID, b$SubjectID), ]
+    stopifnot(isTRUE(all.equal(a$observed, b$observed)), all(a$Date == b$Date), all(a$fold == b$fold))
+  }
+  specifications <- list(
+    list(model = "Mean baseline", candidate = "quadratic", column = "mean_baseline"),
+    list(model = "Simple linear", candidate = "quadratic", column = "simple_linear"),
+    list(model = "Bayesian linear", candidate = "linear", column = "predicted"),
+    list(model = "Bayesian quadratic", candidate = "quadratic", column = "predicted"))
+  for (spec in specifications) {
+    d <- oof_store[[dev]][[spec$candidate]]
+    if (!is.null(d)) {
+      index <- cv_metrics$device == dev & cv_metrics$model == spec$model
+      cv_metrics[index, c("n", "R2", "RMSE", "MAE")] <- score_predictions(d$observed, d[[spec$column]])
+      cv_metrics$source[index] <- "Recomputed from local OOF predictions"
+    }
+  }
+}
+write.csv(cv_metrics, file.path(report_out, "cv_metrics_with_R2.csv"), row.names = FALSE)
+show_table(cv_metrics[, c("device", "model", "n", "R2", "RMSE", "MAE")])
+```
+
+```{r}
+#| label: result-provenance
+#| echo: false
+
+show_table(unique(cv_metrics[, c("device", "source")]))
+```
+
+Adding one quadratic term lowers pooled CV RMSE and MAE for both devices in the reported analysis. The linear model is retained as a reference. Snapshot R² values are rounded to three decimals from the uploaded HTML; local OOF files provide full-precision recomputation. These scores were used during model development, so final performance should also be reported on the supplied test split. Small differences between the two devices do not establish that one device is superior, particularly because their available subjects differ and largely overlap.
+
+## Prediction intervals
+
+```{r}
+#| label: interval-metrics
+
+interval_metrics <- do.call(rbind, lapply(c("linear", "quadratic"), function(candidate) {
+  fallback <- snapshot_intervals[snapshot_intervals$model == candidate, ]
+  read_or_snapshot(file.path(base_results, candidate, "cv_intervals.csv"), fallback)
+}))
+interval_display <- interval_metrics
+interval_display$coverage90 <- 100 * interval_display$coverage90
+names(interval_display)[names(interval_display) == "coverage90"] <- "coverage90_percent"
+show_table(interval_display)
+```
+
+The quadratic models have narrower intervals, while pooled coverage remains close to the nominal 90% level. Aggregate coverage does not establish equal performance across all temperature ranges.
+
+## Residual checks
+
+```{r}
+#| label: fig-linear-residuals
+#| echo: false
+#| out-width: "49%"
+#| fig-show: hold
+#| fig-cap: "Linear-model OOF residuals: FLIR (left) and ICI (right)."
+#| fig-alt: "Both linear residual plots show curvature around the zero line."
+
+show_figures("linear", "oof_residuals")
+```
+
+The linear models show a U-shaped residual trend. This motivated examining one quadratic extension on `canthiMax`. The residual plots alone do not identify which individual predictor causes the curvature.
+
+```{r}
+#| label: fig-quadratic-residuals
+#| echo: false
+#| out-width: "49%"
+#| fig-show: hold
+#| fig-cap: "Quadratic-model OOF residuals: FLIR (left) and ICI (right)."
+#| fig-alt: "Quadratic residual trends are closer to zero over the main prediction range. The lowest ICI predictions retain positive residuals."
+
+show_figures("quadratic", "oof_residuals")
+```
+
+After adding the quadratic term, the main curvature is reduced. The ICI plot retains positive residuals at the low predicted-temperature end, where observations are sparse. There are also individual large errors. These observations remain limitations of the selected model.
+
+## Posterior predictive checks
+
+```{r}
+#| label: fig-quadratic-ppc
+#| echo: false
+#| out-width: "49%"
+#| fig-show: hold
+#| fig-cap: "Posterior predictive density overlays for the full-training quadratic fits: FLIR (left) and ICI (right)."
+#| fig-alt: "Observed oral temperature densities have a sharper central peak near 37 degrees Celsius than the replicated densities."
+
+show_figures("quadratic", "posterior_predictive")
+```
+
+The replicated datasets broadly reproduce the central temperature range and right tail. The observed central peak remains sharper than the replicated peaks. This indicates remaining distributional mismatch. These checks describe data replication at the training predictors and complement the held-out CV assessment \[4\]. A Gaussian regression does not require the marginal distribution of all response values to be Gaussian.
+
+## Sampling diagnostics
+
+```{r}
+#| label: sampling-diagnostics
+
+sampling <- do.call(rbind, lapply(c("linear", "quadratic"), function(candidate) {
+  fallback <- snapshot_diagnostics[snapshot_diagnostics$model == candidate, ]
+  path <- file.path(base_results, candidate, "sampling_diagnostics.csv")
+  if (file.exists(path)) {
+    d <- read.csv(path, stringsAsFactors = FALSE)
+    d$model <- candidate
+    d[, names(snapshot_diagnostics)]
+  } else fallback
+}))
+diagnostic_summary <- do.call(rbind, lapply(split(sampling, list(sampling$device, sampling$model), drop = TRUE), function(d) {
+  data.frame(device = d$device[1], model = d$model[1], fits = nrow(d),
+    max_Rhat = max(d$max_Rhat), min_bulk_ESS = min(d$min_bulk_ESS),
+    min_tail_ESS = min(d$min_tail_ESS),
+    divergences = sum(d$divergent_transitions), treedepth_hits = sum(d$max_treedepth_hits))
+}))
+show_table(diagnostic_summary, digits = c(0, 0, 0, 4, 0, 0, 0, 0))
+write.csv(sampling, file.path(report_out, "sampling_diagnostics.csv"), row.names = FALSE)
+```
+
+The reported fits have Rhat below 1.01, adequate effective sample sizes, zero divergent transitions and zero maximum-tree-depth hits. Numerical convergence supports the reliability of posterior computation, while the residual and predictive checks assess model adequacy separately.
+
+```{r}
+#| label: fig-quadratic-traces
+#| echo: false
+#| out-width: "49%"
+#| fig-show: hold
+#| fig-cap: "Local full-training trace plots, when available: FLIR (left) and ICI (right)."
+
+show_figures("quadratic", "trace")
+```
+
+## Prior sensitivity results
+
+```{r}
+#| label: prior-results
+
+prior_folder <- file.path(base_results, "quadratic_prior_sensitivity")
+prior_results <- read_or_snapshot(file.path(prior_folder, "comparison.csv"), snapshot_prior)
+prior_diagnostics <- read_or_snapshot(file.path(prior_folder, "diagnostics.csv"), snapshot_prior_diagnostics)
+show_table(prior_results[, c("device", "prior_sd", "RMSE", "MAE", "coverage90", "mean_width90",
+                            "mean_abs_prediction_change", "max_abs_prediction_change")], digits = 4)
+write.csv(prior_results, file.path(report_out, "prior_sensitivity.csv"), row.names = FALSE)
+```
+
+The overall CV errors change little across the examined priors. Mean absolute prediction changes are below 0.008°C relative to SD 0.5. Some individual changes are larger, reaching about 0.20°C for ICI. This supports stability of aggregate predictive performance over these settings, without implying that every individual prediction or coefficient is equally stable. We retain SD 0.5 rather than select a prior from the smallest observed CV error.
+
+```{r}
+#| label: prior-diagnostic-summary
+
+show_table(data.frame(
+  fits = nrow(prior_diagnostics),
+  max_Rhat = max(prior_diagnostics$max_Rhat),
+  min_bulk_ESS = min(prior_diagnostics$min_bulk_ESS),
+  min_tail_ESS = min(prior_diagnostics$min_tail_ESS),
+  divergences = sum(prior_diagnostics$divergent_transitions),
+  treedepth_hits = sum(prior_diagnostics$max_treedepth_hits)
+), digits = c(0, 4, 0, 0, 0, 0))
+```
+
+## Bayesian R² for the full-training models
+
+This is a posterior summary of training-model fit, reported with a 95% credible interval \[5\]. It is distinct from the predictive CV R² above and should be labelled separately.
+
+```{r}
+#| label: bayesian-r2
+#| results: asis
+
+bayesian_r2 <- list()
+if (isTRUE(params$compute_bayesian_r2) && requireNamespace("brms", quietly = TRUE)) {
+  for (dev in devices) {
+    path <- file.path("models", "bayes_shared", "quadratic", paste0(dev, "_final_fit.rds"))
+    if (file.exists(path)) {
+      fit <- readRDS(path)
+      r2 <- brms::bayes_R2(fit, probs = c(0.025, 0.975))
+      bayesian_r2[[dev]] <- data.frame(device = dev, evaluation = "Full-training Bayesian R2",
+        estimate = r2[1, 1], posterior_sd = r2[1, 2], lower95 = r2[1, 3], upper95 = r2[1, 4])
+    }
+  }
+}
+if (length(bayesian_r2)) {
+  bayesian_r2 <- do.call(rbind, bayesian_r2)
+  print(show_table(bayesian_r2))
+  write.csv(bayesian_r2, file.path(report_out, "bayesian_R2_training.csv"), row.names = FALSE)
+} else {
+  cat("Bayesian R2 below is a rounded summary from the supplied rendered HTML. Local saved fits take precedence when enabled.\n\n")
+  print(show_table(snapshot_bayesian_r2))
+}
+```
+
+# Common test comparison: R² and RMSE
+
+The primary comparison is **Bayesian quadratic versus the RFE-selected random forest**, separately for FLIR and ICI. The all-feature RF and the two baselines are reference models. Both primary models use the same train/test subject assignments, response, predictor definitions and test individuals. Their model-specific transformations are fitted using training data only.
+
+Test scoring is enabled in this integrated version because the task is now to compare the fixed approaches. The code checks shared training IDs, test IDs, outcomes and model input hashes. It uses saved Bayesian fits and either saved RF fits or validated RF prediction exports. All metrics below are from the same test observations; no CV or full-training R² is substituted into the comparison.
+
+```{r}
+#| label: evaluate-common-test
+#| results: asis
+
+if (isTRUE(params$evaluate_test)) {
+  if (!requireNamespace("brms", quietly = TRUE)) stop("Install brms to read the fitted models.")
+  test_out <- file.path("results", "combined_comparison")
+  dir.create(test_out, recursive = TRUE, showWarnings = FALSE)
+  split_path <- file.path("data", "bayes_shared", "supplied_subject_split.csv")
+  plan <- read.csv(split_path, stringsAsFactors = FALSE)
+  stopifnot(!anyDuplicated(plan$SubjectID))
+  test_scores <- test_intervals <- test_predictions <- list()
+  test_inputs <- split_path
+
+  apply_saved_preprocessing <- function(raw, bundle) {
+    d <- raw[, c("target", bundle$features), drop = FALSE]
+    parameters <- bundle$preprocessing
+    for (v in bundle$features) {
+      p <- parameters[parameters$variable == v, , drop = FALSE]
+      stopifnot(nrow(p) == 1L, is.finite(p$median), is.finite(p$center), p$scale > 0)
+      d[[v]][is.na(d[[v]])] <- p$median
+      d[[v]] <- (d[[v]] - p$center) / p$scale
+    }
+    if (isTRUE(bundle$add_quadratic)) {
+      p <- parameters[parameters$variable == "canthiMax_sq", , drop = FALSE]
+      stopifnot(nrow(p) == 1L, is.finite(p$center), p$scale > 0)
+      d$canthiMax_sq <- (d$canthiMax^2 - p$center) / p$scale
+    }
+    stopifnot(all(is.finite(as.matrix(d))))
+    d
+  }
+
+  for (device_index in seq_along(devices)) {
+    dev <- devices[device_index]
+    bundle_path <- file.path("models", "bayes_shared", "quadratic", paste0(dev, "_final_bundle.rds"))
+    train_path <- file.path("data", "bayes_shared", paste0(dev, "_train_unimputed.csv"))
+    test_path <- file.path("data", "bayes_shared", paste0(dev, "_test_unimputed.csv"))
+    bundle <- readRDS(bundle_path)
+    train_raw <- read.csv(train_path, stringsAsFactors = FALSE)
+    test_raw <- read.csv(test_path, stringsAsFactors = FALSE)
+    stopifnot(isTRUE(bundle$diagnostics_passed), identical(bundle$device, dev),
+              identical(bundle$model_name, "quadratic"), isTRUE(bundle$add_quadratic),
+              !anyDuplicated(train_raw$SubjectID), !anyDuplicated(test_raw$SubjectID),
+              all(train_raw$split == "train"), all(test_raw$split == "test"),
+              setequal(train_raw$SubjectID, bundle$training_subject_ids),
+              !length(intersect(bundle$training_subject_ids, test_raw$SubjectID)),
+              !anyNA(match(test_raw$SubjectID, plan$SubjectID)),
+              all(plan$split[match(test_raw$SubjectID, plan$SubjectID)] == "test"))
+    fitted_hashes <- read.csv(file.path(base_results, "quadratic", "fitting_input_checksums.csv"), stringsAsFactors = FALSE)
+    current_hash <- unname(tools::md5sum(train_path))
+    index <- match(train_path, fitted_hashes$file)
+    stopifnot(!is.na(index), identical(tolower(current_hash), tolower(fitted_hashes$checksum[index])))
+    train <- apply_saved_preprocessing(train_raw, bundle)
+    test <- apply_saved_preprocessing(test_raw, bundle)
+    fit <- bundle$fit
+    predicted <- colMeans(brms::posterior_epred(fit, newdata = test))
+    set.seed(20261018L + 1000L + device_index)
+    yrep <- brms::posterior_predict(fit, newdata = test, ndraws = 2000)
+    bounds <- apply(yrep, 2, quantile, probs = c(0.05, 0.95))
+    simple <- lm(target ~ canthiMax, data = train)
+    d <- data.frame(device = dev, SubjectID = test_raw$SubjectID, Date = test_raw$Date,
+      observed = test$target, mean_baseline = mean(train$target),
+      simple_linear = as.numeric(predict(simple, newdata = test)),
+      predicted = predicted, lower90 = bounds[1, ], upper90 = bounds[2, ])
+    # Add RF predictions for exactly the same subjects and predictor definitions.
+    rf_bundle_path <- file.path("models", "rf_shared", paste0(dev, "_final_bundle.rds"))
+    rf_predictions_path <- file.path("results", "rf_shared", paste0(dev, "_test_predictions.csv"))
+    rf_ids_path <- file.path("results", "rf_shared", paste0(dev, "_training_ids.csv"))
+    if (file.exists(rf_bundle_path) && requireNamespace("ranger", quietly = TRUE)) {
+      rf <- readRDS(rf_bundle_path)
+      stopifnot(identical(rf$device, dev), identical(rf$protocol, "peer-rf-shared-split-v1"),
+        identical(rf$features, bundle$features),
+        setequal(rf$training_subject_ids, bundle$training_subject_ids),
+        identical(tolower(rf$training_file_checksum), tolower(unname(tools::md5sum(train_path)))),
+        length(rf$features_selected) > 0L, all(rf$features_selected %in% rf$features))
+      med <- rf$median_imputer[rf$features]
+      expected_med <- vapply(train_raw[rf$features], median, numeric(1), na.rm = TRUE)
+      stopifnot(isTRUE(all.equal(unname(med), unname(expected_med), tolerance = 1e-8)))
+      X_test <- test_raw[rf$features]
+      for (v in rf$features) X_test[[v]][is.na(X_test[[v]])] <- med[[v]]
+      stopifnot(all(is.finite(as.matrix(X_test))))
+      d$RF_selected <- predict(rf$fit_selected, data = X_test[rf$features_selected])$predictions
+      d$RF_all <- predict(rf$fit_all, data = X_test)$predictions
+      d$RF_source <- rf$origin
+      test_inputs <- c(test_inputs, rf_bundle_path)
+    } else if (file.exists(rf_predictions_path) && file.exists(rf_ids_path)) {
+      rf_predictions <- read.csv(rf_predictions_path, stringsAsFactors = FALSE)
+      rf_ids <- read.csv(rf_ids_path, stringsAsFactors = FALSE)
+      stopifnot(all(c("SubjectID", "observed", "RF_selected", "RF_all") %in% names(rf_predictions)),
+        !anyDuplicated(rf_predictions$SubjectID), !anyDuplicated(rf_ids$SubjectID),
+        setequal(rf_predictions$SubjectID, d$SubjectID),
+        setequal(rf_ids$SubjectID, bundle$training_subject_ids))
+      rf_predictions <- rf_predictions[match(d$SubjectID, rf_predictions$SubjectID), ]
+      stopifnot(isTRUE(all.equal(rf_predictions$observed, d$observed, tolerance = 1e-8)))
+      if ("device" %in% names(rf_predictions)) stopifnot(all(rf_predictions$device == dev))
+      d$RF_selected <- rf_predictions$RF_selected
+      d$RF_all <- rf_predictions$RF_all
+      d$RF_source <- "Validated exported RF test predictions with shared training IDs"
+      test_inputs <- c(test_inputs, rf_predictions_path, rf_ids_path)
+    } else if (file.exists(rf_bundle_path)) {
+      stop("Install ranger to predict with the saved RF models, or provide the validated RF prediction CSV exports.")
+    } else {
+      stop("Missing RF fits/predictions for ", dev, ". Enable fit_rf, or export the collaborator's existing res object first.")
+    }
+    stopifnot(all(is.finite(d$RF_selected)), all(is.finite(d$RF_all)))
+
+    score_labels <- c(mean_baseline = "Training mean", simple_linear = "Simple linear",
+      predicted = "Bayesian quadratic", RF_selected = "Random forest (selected)",
+      RF_all = "Random forest (all predictors)")
+    for (model in names(score_labels)) {
+      test_scores[[length(test_scores) + 1L]] <- data.frame(device = dev,
+        model = unname(score_labels[[model]]), evaluation = "Matched supplied test subjects", score_predictions(d$observed, d[[model]]))
+    }
+    test_intervals[[dev]] <- data.frame(device = dev, n = nrow(d),
+      coverage90 = mean(d$observed >= d$lower90 & d$observed <= d$upper90),
+      mean_width90 = mean(d$upper90 - d$lower90))
+    test_predictions[[dev]] <- d
+    write.csv(d, file.path(test_out, paste0(dev, "_test_predictions.csv")), row.names = FALSE)
+    test_inputs <- c(test_inputs, bundle_path, train_path, test_path)
+  }
+  test_scores <- do.call(rbind, test_scores)
+  test_intervals <- do.call(rbind, test_intervals)
+  write.csv(test_scores, file.path(test_out, "test_metrics.csv"), row.names = FALSE)
+  write.csv(test_intervals, file.path(test_out, "test_intervals.csv"), row.names = FALSE)
+  hashes <- tools::md5sum(test_inputs)
+  write.csv(data.frame(file = names(hashes), algorithm = "MD5", checksum = unname(hashes)),
+            file.path(test_out, "evaluation_input_checksums.csv"), row.names = FALSE)
+  writeLines(c(
+    "Fixed model: per-device Gaussian regression, 29 predictors plus standardized canthiMax square.",
+    "Reference coefficient prior SD 0.5. Models are read from the saved quadratic final bundles.",
+    "RF selected model is primary; all-feature RF is a reference. No winner is selected from test scores during training.",
+    "RF training IDs must match the Bayesian training IDs; test IDs/outcomes are checked before metrics.",
+    "RF medians come from outer training only. RF inner CV preprocessing follows the peer method.",
+    "Saved training medians, centers and scales are applied unchanged to test predictors.",
+    "Test IDs must be disjoint from saved training IDs and agree with the supplied split.",
+    "Point prediction: mean posterior_epred; intervals: 5th and 95th posterior_predict percentiles.",
+    "Predictive seed: 20261018 + 1000 + device_index; 2000 predictive draws.",
+    "R2 = 1 - SSE/SST using the test outcome mean; errors and interval widths are in degrees Celsius.",
+    "Report this as the supplied-split evaluation. Earlier pilot work used a different split.",
+    "Do not revise the model repeatedly in response to these test results."
+  ), file.path(test_out, "evaluation_record.txt"))
+  print(show_table(test_scores))
+  print(show_table(test_intervals))
+    main_comparison <- do.call(rbind, lapply(devices, function(dev) {
+      b <- test_scores[test_scores$device == dev & test_scores$model == "Bayesian quadratic", , drop = FALSE]
+      r <- test_scores[test_scores$device == dev & test_scores$model == "Random forest (selected)", , drop = FALSE]
+      stopifnot(nrow(b) == 1L, nrow(r) == 1L, b$n == r$n)
+      difference <- b$RMSE - r$RMSE
+      better <- if (abs(difference) < 1e-10) "Numerical tie" else
+        if (difference < 0) "Bayesian quadratic" else "Random forest (selected)"
+      data.frame(device = dev, n = b$n, Bayesian_R2 = b$R2, RF_R2 = r$R2,
+        Bayesian_RMSE = b$RMSE, RF_RMSE = r$RMSE,
+        RMSE_difference_Bayes_minus_RF = difference, lower_test_RMSE = better)
+    }))
+    write.csv(main_comparison, file.path(test_out, "main_model_comparison.csv"), row.names = FALSE)
+    cat("\n\n### Primary model comparison\n\n")
+    print(show_table(main_comparison))
+    for (i in seq_len(nrow(main_comparison))) {
+      row <- main_comparison[i, ]
+      if (row$lower_test_RMSE == "Numerical tie") {
+        cat("\n\n", row$device, ": the primary models have numerically equal test RMSE.\n", sep = "")
+      } else {
+        cat("\n\n", row$device, ": **", row$lower_test_RMSE,
+          "** has the lower observed test RMSE, by ",
+          sprintf("%.4f", abs(row$RMSE_difference_Bayes_minus_RF)), " degrees Celsius.\n", sep = "")
+      }
+    }
+    cat("\n\nThe comparison uses identical subjects and outcomes within each device. With the same R2 denominator, a lower RMSE also gives a higher R2. These are observed test-set differences; they do not establish a universal or statistically significant advantage.\n")
+
+
+} else {
+  cat("Final test scoring is deferred. This evaluation block has not read or scored test observations.\n")
+}
+```
+
+For a given device and identical test outcomes, both models have the same R² denominator. The model with lower RMSE therefore also has higher predictive R². The two metrics describe the same squared-error comparison in different units. The comparison reports the observed difference rather than treating it as proof of a general or statistically significant advantage.
+
+```{r}
+#| label: fig-common-test-predictions
+#| echo: false
+#| fig-cap: "Matched test predictions for the two primary models, with the identity line."
+
+if (isTRUE(params$evaluate_test) && exists("test_predictions") && requireNamespace("ggplot2", quietly = TRUE)) {
+  paired <- do.call(rbind, test_predictions)
+  plot_data <- rbind(
+    data.frame(device = paired$device, model = "Bayesian quadratic", observed = paired$observed, predicted = paired$predicted),
+    data.frame(device = paired$device, model = "Random forest (selected)", observed = paired$observed, predicted = paired$RF_selected))
+  ggplot2::ggplot(plot_data, ggplot2::aes(observed, predicted)) +
+    ggplot2::geom_point(alpha = 0.45, size = 1.2) +
+    ggplot2::geom_abline(slope = 1, intercept = 0, colour = "firebrick") +
+    ggplot2::facet_grid(device ~ model) + ggplot2::coord_equal() + ggplot2::theme_bw() +
+    ggplot2::labs(x = "Observed oral temperature (degrees C)", y = "Predicted oral temperature (degrees C)")
+} else cat("Matched test plots require the common test evaluation.\n")
+```
+
+```{r}
+#| label: common-temperature-strata
+
+if (isTRUE(params$evaluate_test) && exists("test_predictions")) {
+  strata_scores <- list()
+  for (dev in devices) {
+    d <- test_predictions[[dev]]
+    strata <- ifelse(d$observed >= 37.5, ">=37.5 degrees C", "<37.5 degrees C")
+    for (level in unique(strata)) for (model in c("predicted", "RF_selected")) {
+      group <- d[strata == level, ]
+      strata_scores[[length(strata_scores) + 1L]] <- data.frame(device = dev,
+        stratum = level, model = if (model == "predicted") "Bayesian quadratic" else "Random forest (selected)",
+        n = nrow(group), RMSE = sqrt(mean((group$observed - group[[model]])^2)),
+        MAE = mean(abs(group$observed - group[[model]])))
+    }
+  }
+  strata_scores <- do.call(rbind, strata_scores)
+  show_table(strata_scores)
+} else cat("Temperature-stratum test errors have not been calculated in this render.\n")
+```
+
+The temperature strata provide descriptive error summaries. Small subgroup counts limit interpretation; this regression comparison does not itself establish a diagnostic screening threshold.
+
+# Discussion and limitations
+
+The final test comparison above determines which primary method has lower observed prediction error within each device. Its verdict is generated only from matched test predictions.
+
+The shared-data results support the single quadratic extension as the Bayesian candidate. It improves aggregate CV errors for both devices, reduces the main residual curvature and preserves approximately nominal pooled interval coverage. Predictive performance is stable over the examined coefficient prior settings.
+
+Several limitations remain. The central predictive density is flatter than the observed density. The lowest ICI predictions retain bias, and sparse temperature extremes limit assessment there. Correlated facial predictors complicate interpretation of individual coefficients. Available-round averaging gives variables and subjects different numbers of contributing measurements. The shared cleaning cutoff may also restrict the range of facial temperatures represented.
+
+The supplied outer split separates subjects, while the inner CV separates acquisition dates. Test subjects may still share collection dates with training subjects. This study does not establish performance in a different clinical setting, with new device calibration or in a population with a different temperature distribution.
+
+The RF tuning and RFE scores are development results; their resampling and preprocessing differ from the Bayesian CV. The final comparison uses a separate common subject test split. The same Bayesian CV results were inspected during model development. Earlier pilot work used round-one measurements and a different split; its results are excluded from the main comparison here. The project should retain that history and describe final evaluation using the supplied assignments without claiming an entirely untouched historical holdout unless the earlier subject usage has been checked.
+
+# FAIR and reproducibility
+
+FAIR concerns whether research objects can be found, accessed, connected and reused \[7\]. CV and sampling diagnostics assess statistical reliability; code, metadata, provenance, identifiers and licensing support FAIR reuse.
+
+| Principle | Included in this workflow | Release action |
+|------------------------|------------------------|------------------------|
+| Findable | Dataset DOI/version, descriptive title, author, metadata and named outputs. | Add the project repository URL and an archived release identifier. |
+| Accessible | Public source link, readable HTML and executable source. | Keep the report, metadata and access instructions available. |
+| Interoperable | CSV tables, `SubjectID` keys, explicit variable names, ISO dates and units. | Retain the variable dictionary and link derived files to their inputs. |
+| Reusable | CC0 source data, MIT code, cleaning logs, priors, seeds, folds and checksums. | Commit the actual `renv.lock`, release version and contributor information. |
+
+The preparation step exports `variable_dictionary.csv`, correction logs and raw input checksums. The fit scripts retain fold assignments, preprocessing parameters, posterior summaries and environment records. This report exports the metrics it displays and machine-readable analysis metadata. A source DOI alone does not give the project code its own persistent identifier.
+
+```{r}
+#| label: reproducibility-record
+
+metadata <- data.frame(
+  field = c("analysis_version", "author", "dataset_doi", "dataset_version", "data_license", "code_license",
+    "target", "target_unit", "base_predictors", "quadratic_predictor", "coefficient_prior_sd",
+    "outer_split", "cv_scheme", "cv_seed", "test_evaluation_enabled", "repository_url", "archive_doi"),
+  value = c("0.2.0", "Lei Huang and project collaborator", "10.13026/3bhc-9065", "1.0.0", "CC0-1.0", "MIT",
+    "aveOralM", "degrees Celsius", "29", "standardized square of standardized canthiMax", "0.5",
+    "data/split_train_test_aveOralM.csv", "five-fold acquisition-date groups", "20261018",
+    as.character(isTRUE(params$evaluate_test)), params$repository_url, params$archive_doi))
+metadata <- rbind(metadata, data.frame(
+  field = c("primary_rf", "rf_rfe_resamples", "rf_inner_imputation", "primary_comparison"),
+  value = c("RFE-selected and training-CV tuned ranger forest", "3 x 5 date groups",
+    "outer-training medians before inner resampling; peer method preserved",
+    "Bayesian quadratic versus RF selected on identical supplied test subjects")))
+write.csv(metadata, file.path(report_out, "analysis_metadata.csv"), row.names = FALSE)
+write.csv(cv_metrics[, c("device", "model", "source")], file.path(report_out, "result_provenance.csv"), row.names = FALSE)
+writeLines(capture.output(sessionInfo()), file.path(report_out, "render_sessionInfo.txt"))
+qmd <- "workflow_combined.qmd"
+if (file.exists(qmd)) {
+  hash <- tools::md5sum(qmd)
+  write.csv(data.frame(file = names(hash), algorithm = "MD5", checksum = unname(hash)),
+            file.path(report_out, "report_source_checksum.csv"), row.names = FALSE)
+}
+show_table(data.frame(
+  item = c("renv.lock", "Repository URL", "Archived release identifier"),
+  status = c(if (file.exists("renv.lock")) "Present; verify it matches the successful analysis environment" else "Not present in this project copy",
+    if (nzchar(params$repository_url)) params$repository_url else "Not supplied",
+    if (nzchar(params$archive_doi)) params$archive_doi else "Not supplied")))
+```
+
+Run the following environment commands deliberately in the successful project environment. They are shown for reproducibility and are not executed by an ordinary report render.
+
+```{r}
+#| label: environment-lock
+#| eval: false
+
+# Initialize renv only if this project does not already use it.
+# renv::init()
+renv::snapshot()
+
+# A collaborator can restore the committed environment before rebuilding.
+# renv::restore()
+```
+
+# References
+
+1.  Wang, Q., Zhou, Y., Ghassemi, P., Chenna, D., Chen, M., Casamento, J., Pfefer, J., and Mcbride, D. (2023). *Facial and oral temperature data from a large set of human subject volunteers*, version 1.0.0. PhysioNet. <https://doi.org/10.13026/3bhc-9065>.
+
+2.  Wang, Q., Zhou, Y., Ghassemi, P., McBride, D., Casamento, J. P., and Pfefer, T. J. (2022). Infrared Thermography for Measuring Elevated Body Temperature: Clinical Accuracy, Calibration, and Evaluation. *Sensors*, 22, 215. <https://doi.org/10.3390/s22010215>.
+
+3.  Bürkner, P.-C. (2017). brms: An R Package for Bayesian Multilevel Models Using Stan. *Journal of Statistical Software*, 80(1), 1–28. <https://doi.org/10.18637/jss.v080.i01>.
+
+4.  Stan Development Team. *Posterior and Prior Predictive Checks*. [Stan User's Guide](https://mc-stan.org/docs/stan-users-guide/posterior-predictive-checks.html).
+
+5.  Gelman, A., Goodrich, B., Gabry, J., and Vehtari, A. (2019). R-squared for Bayesian regression models. *The American Statistician*, 73(3), 307–309. <https://doi.org/10.1080/00031305.2018.1549100>.
+
+6.  Kuhn, M., Vaughan, D., and Hvitfeldt, E. *yardstick: Traditional R squared*. [Official documentation](https://yardstick.tidymodels.org/reference/rsq_trad.html).
+
+7.  Wilkinson, M. D., et al. (2016). The FAIR Guiding Principles for scientific data management and stewardship. *Scientific Data*, 3, 160018. <https://doi.org/10.1038/sdata.2016.18>.
+
+8.  Wright, M. N., and Ziegler, A. (2017). ranger: A Fast Implementation of Random Forests for High Dimensional Data in C++ and R. *Journal of Statistical Software*, 77(1), 1–17. <https://doi.org/10.18637/jss.v077.i01>.
+
+9.  Kuhn, M. *The caret Package: Recursive Feature Elimination*. [Official documentation](https://topepo.github.io/caret/recursive-feature-elimination.html).
+
+# Appendix: Full-training coefficient summaries
+
+The following tables load the saved 95% coefficient summaries when available. They come from one full-training fit per device. Fold-specific posteriors are not pooled into a single posterior. Because the facial variables are correlated, coefficient intervals should be interpreted as conditional associations within the specified model.
+
+```{r}
+#| label: coefficient-summaries
+#| results: asis
+
+for (dev in devices) {
+  path <- file.path(base_results, "quadratic", paste0(dev, "_coefficients_95.csv"))
+  cat("\n\n### ", dev, "\n\n", sep = "")
+  if (file.exists(path)) {
+    coefficients <- read.csv(path, check.names = FALSE)
+    cat(as.character(show_table(coefficients)), sep = "\n")
+  } else {
+    snapshot_path <- file.path("report_assets", "quadratic", paste0(dev, "_coefficients_95_reported.csv"))
+    if (file.exists(snapshot_path)) {
+      cat("Rounded coefficient summary from the supplied rendered HTML:\n\n")
+      cat(as.character(show_table(read.csv(snapshot_path, check.names = FALSE))), sep = "\n")
+    } else cat("Saved coefficient summaries are not available in this copy.\n")
+  }
+}
+```
